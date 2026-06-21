@@ -198,3 +198,28 @@ Maharaja Agrasen Institute of Technology (MAIT), Delhi
 ## License
 
 This project is intended for educational and learning purposes.
+## Screenshots
+
+### Homepage
+
+The landing page where users can search any topic and initiate the RAG pipeline.
+
+![Homepage](screenshots/Homepage.png)
+
+---
+
+### Article Retrieval
+
+After selecting a topic, the system fetches and processes the corresponding Wikipedia article.
+
+![Article](screenshots/Article.png)
+
+---
+
+### Question Answering
+
+Users can ask questions related to the loaded article, and the RAG pipeline retrieves relevant context before generating answers.
+
+![Question Answering](screenshots/Question%20answering.png)
+
+---
