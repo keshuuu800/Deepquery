@@ -212,7 +212,7 @@ The landing page where users can search any topic and initiate the RAG pipeline.
 
 After selecting a topic, the system fetches and processes the corresponding Wikipedia article.
 
-![Article](screenshots/Article .png)
+![Article](screenshots/Article.png)
 
 ---
 
