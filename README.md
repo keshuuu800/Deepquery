@@ -202,12 +202,24 @@ This project is intended for educational and learning purposes.
 
 ### Homepage
 
-![Homepage](screenshots/homepage.png)
+The landing page where users can search any topic and initiate the RAG pipeline.
+
+![Homepage](screenshots/Homepage.png)
+
+---
 
 ### Article Retrieval
 
-![Article](screenshots/article.png)
+After selecting a topic, the system fetches and processes the corresponding Wikipedia article.
+
+![Article](screenshots/Article.png)
+
+---
 
 ### Question Answering
 
-![Question Answering](screenshots/question-answering.png)
+Users can ask questions related to the loaded article, and the RAG pipeline retrieves relevant context before generating answers.
+
+![Question Answering](screenshots/Question-answering.png)
+
+---
