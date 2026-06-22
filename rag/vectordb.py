@@ -1,42 +1,16 @@
-import chromadb
+from langchain_chroma import Chroma
+from rag.embeddings import model as embedding_model
 
-client = chromadb.PersistentClient(
-    path="./chroma_db"
-)
+CHROMA_DATA_DIR = "chroma_db"
 
-collection = client.get_or_create_collection(
-    "wikipedia"
-)
-
-import chromadb
-
-client = chromadb.PersistentClient(
-    path="chroma_db"
-)
-
-collection = client.get_or_create_collection(
-    "wiki_articles"
-)
-
-def store_chunks(
-    title,
-    chunks
-):
-
-    ids = [
-        f"{title}_{i}"
-        for i in range(len(chunks))
-    ]
-
-    metadatas = [
-        {
-            "article": title
-        }
-        for _ in chunks
-    ]
-
-    collection.add(
-        ids=ids,
-        documents=chunks,
-        metadatas=metadatas
+def store_in_vector_db(chunks: list):
+    """
+    Takes a list of text chunks, generates their embeddings natively,
+    and stores them locally inside ChromaDB.
+    """
+    vector_store = Chroma(
+        collection_name="wikipedia_rag",
+        embedding_function=embedding_model,
+        persist_directory=CHROMA_DATA_DIR
     )
+    vector_store.add_texts(texts=chunks)

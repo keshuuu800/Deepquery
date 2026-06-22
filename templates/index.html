@@ -384,7 +384,7 @@ body{font-family:'Inter',sans-serif;color:#e8f4f2}
 
 <nav id="nav">
   <div class="nav-logo">DeepQuery</div>
-  <div class="nav-tag">DIVE • DISCOVER • UNDERSTAND</div>
+  <div class="nav-tag">DIVE · DISCOVER · UNDERSTAND</div>
 </nav>
 
 
@@ -407,9 +407,10 @@ body{font-family:'Inter',sans-serif;color:#e8f4f2}
         <span class="hp" data-q="Black hole">Black hole</span>
         <span class="hp" data-q="Marie Curie">Marie Curie</span>
         <span class="hp" data-q="Great Barrier Reef">Great Barrier Reef</span>
+       
       </div>
     </div>
-    
+  
   </section>
 
   <div id="stage">
@@ -529,9 +530,20 @@ function toast(msg,type=''){
 
 function addMsg(role,text){
   const w=document.createElement('div'); w.className='msg '+role;
+  // Format plain text: handle newlines and bullet points nicely
+  function formatText(t){
+    return t.split('\n').filter(l=>l.trim()).map(line=>{
+      line = esc(line.trim());
+      // Bullet lines
+      if(/^[•\-\*]\s+/.test(line)) return `<p style="padding-left:.8rem;position:relative"><span style="position:absolute;left:0;color:#0eb5a0">•</span> ${line.replace(/^[•\-\*]\s+/,'')}</p>`;
+      // Numbered list lines
+      if(/^\d+\.\s+/.test(line)) return `<p style="padding-left:1.2rem;position:relative"><span style="position:absolute;left:0;color:#0eb5a0">${line.match(/^\d+/)[0]}.</span> ${line.replace(/^\d+\.\s+/,'')}</p>`;
+      return `<p>${line}</p>`;
+    }).join('');
+  }
   w.innerHTML=`<div class="msg-lbl">${role==='user'?'You':'Deep'}</div>
     <div class="mb"><div class="mr">${role==='user'?'Question':'Answer'}</div>
-    <div class="mt">${text.split('\n').filter(Boolean).map(l=>`<p>${esc(l)}</p>`).join('')}</div></div>`;
+    <div class="mt">${formatText(text)}</div></div>`;
   $('chat').appendChild(w); w.scrollIntoView({behavior:'smooth',block:'end'});
 }
 function addLoader(){

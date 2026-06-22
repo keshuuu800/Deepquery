@@ -1,29 +1,10 @@
-# rag/chunker.py
-
-def chunk_text(
-    text,
-    chunk_size=400,
-    overlap=100
-):
-
-    words = text.split()
-
-    chunks = []
-
-    start = 0
-
-    while start < len(words):
-
-        end = start + chunk_size
-
-        chunk = " ".join(
-            words[start:end]
-        )
-
-        chunks.append(chunk)
-
-        start += (
-            chunk_size - overlap
-        )
-
-    return chunks
+import os
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+def chunk_text(raw_text: str) -> list:
+    """Splits a large string of text into smaller, overlapping chunks."""
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len,
+    )
+    return text_splitter.split_text(raw_text)
