@@ -3,9 +3,6 @@ flask-cors
 requests
 beautifulsoup4
 rapidfuzz
-sentence-transformers
-numpy
 openai
 python-dotenv
 gunicorn
-torch

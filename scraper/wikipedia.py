@@ -1,96 +1,23 @@
 import requests
 from bs4 import BeautifulSoup
-from rapidfuzz import process
 
-from scraper.cache import (
-    get_cache,
-    save_cache
-)
-
-HEADERS = {
-    "User-Agent": "WikiRAGBot/1.0"
-}
-
-
-def resolve_title(query):
-
-    url = (
-        "https://en.wikipedia.org/w/api.php"
-        "?action=opensearch"
-        f"&search={query}"
-        "&limit=10"
-        "&format=json"
-    )
-
-    response = requests.get(
-        url,
-        headers=HEADERS
-    )
-
-    candidates = response.json()[1]
-
-    if not candidates:
-        return None
-
-    match = process.extractOne(
-        query,
-        candidates
-    )
-
-    return match[0]
-
-
-def scrape_article(title):
-
-    cached = get_cache(title)
-
-    if cached:
-        print("Cache Hit:", title)
-        return cached
-
-    print("Scraping:", title)
-
-    url = (
-        "https://en.wikipedia.org/wiki/"
-        + title.replace(" ", "_")
-    )
-
-    html = requests.get(
-        url,
-        headers=HEADERS
-    ).text
-
-    soup = BeautifulSoup(
-        html,
-        "lxml"
-    )
-
-    tables = soup.find_all("table")
-
-    paragraphs = soup.select(
-        "div.mw-parser-output > p"
-    )
-
-    text = []
-
-    for p in paragraphs:
-
-        t = p.get_text(
-            " ",
-            strip=True
-        )
-
-        if len(t) > 50:
-            text.append(t)
-
-    data = {
-        "text": "\n".join(text),
-        "tables": len(tables)
-    }
-
-    save_cache(
-        title,
-        data
-    )
-
-    return data
+def scrape_wikipedia(url: str) -> str:
+    """Scrapes raw text from a given Wikipedia URL, discarding styles and navigation text."""
+    headers = {"User-Agent": "WikiRAGEngine/1.0 (contact: email@example.com)"}
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code != 200:
+        raise Exception(f"Failed to fetch Wikipedia page. Status code: {response.status_code}")
+        
+    soup = BeautifulSoup(response.text, "html.parser")
+    
+    # Target only the main article text area
+    content_div = soup.find(id="mw-content-text")
+    if not content_div:
+        raise Exception("Could not find main content text in the Wikipedia page.")
+        
+    # Extract paragraphs
+    paragraphs = content_div.find_all("p")
+    text_content = " ".join([p.get_text() for p in paragraphs if p.get_text().strip()])
+    
+    return text_content
