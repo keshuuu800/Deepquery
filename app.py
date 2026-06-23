@@ -87,7 +87,13 @@ def retrieve_chunks_bm25(chunks: list, question: str, top_k: int = 12) -> list:
     scored = [(bm25_score(query_tokens, c, chunks), c) for c in chunks]
     scored.sort(key=lambda x: x[0], reverse=True)
     results = [c for _, c in scored[:top_k] if _ > 0]
-    return results if results else chunks[:top_k]
+    top = results if results else chunks[:top_k]
+    # ── Debug: log the top retrieved chunks ────────────────────────
+    logger.info(f"[BM25] Retrieved {len(top)} chunks for query: '{question}'")
+    for i, (score, chunk) in enumerate(scored[:min(3, len(scored))]):
+        preview = chunk[:120].replace("\n", " ")
+        logger.info(f"  [{i+1}] score={score:.3f} | {preview}")
+    return top
 
 # ── Cache helpers ───────────────────────────────────────────────
 
@@ -140,8 +146,125 @@ def resolve_title(query: str) -> Optional[str]:
     time.sleep(RATE_LIMIT_DELAY)
     return title
 
+def _get_section_heading(element) -> str:
+    """Walk backwards through siblings/ancestors to find the nearest heading."""
+    # Check preceding siblings first
+    for sibling in element.find_previous_siblings():
+        tag = getattr(sibling, "name", None)
+        if tag in ("h1", "h2", "h3", "h4"):
+            return sibling.get_text(" ", strip=True)
+    # Fall back to parent's preceding siblings
+    parent = element.parent
+    if parent:
+        for sibling in parent.find_previous_siblings():
+            tag = getattr(sibling, "name", None)
+            if tag in ("h1", "h2", "h3", "h4"):
+                return sibling.get_text(" ", strip=True)
+    return "Table"
+
+
+def extract_table_chunks(content_div) -> list:
+    """
+    Extract all content tables from the Wikipedia article and convert each
+    into a structured text chunk for embedding/indexing.
+
+    Output format per table:
+        <Section Heading>:
+        Row Label | col1: val1 | col2: val2 | ...
+        Row Label | col1: val1 | col2: val2 | ...
+    """
+    table_chunks = []
+    # Skip known non-content table classes
+    skip_classes = {"infobox", "navbox", "ambox", "wikitable-stub",
+                    "mbox-small", "toc", "sidebar"}
+
+    tables = content_div.find_all("table")
+    logger.info(f"[TABLE] Found {len(tables)} raw tables in article")
+
+    for table in tables:
+        classes = set(table.get("class", []))
+        if classes & skip_classes:
+            continue
+
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+
+        # ── Extract column headers — handle multi-row <th> headers ──
+        # Collect all header rows; the LAST one has the most granular labels
+        header_rows = [r for r in rows if r.find("th")]
+        header_row = header_rows[-1] if header_rows else None
+
+        if header_row:
+            headers = [th.get_text(" ", strip=True) for th in header_row.find_all("th")]
+            headers = [re.sub(r"\s+", " ", h) for h in headers if h]
+            # If multi-row headers exist, pull a human-readable label from row 0
+            if len(header_rows) > 1:
+                first_ths = header_rows[0].find_all("th")
+                if first_ths:
+                    label_candidate = first_ths[0].get_text(" ", strip=True)
+                    label_candidate = re.sub(r"\s+", " ", label_candidate).strip()
+                    # Store as extra context; will be prepended to chunk
+                    table_caption = label_candidate
+                else:
+                    table_caption = None
+            else:
+                table_caption = None
+        else:
+            # No <th> headers — try first row as plain text labels
+            first_cells = rows[0].find_all(["td", "th"])
+            headers = [c.get_text(" ", strip=True) for c in first_cells]
+            table_caption = None
+
+        if len(headers) < 2:
+            # Single-column or empty table — not useful
+            continue
+
+        # ── Determine section label ─────────────────────────────────
+        section_label = _get_section_heading(table)
+        # If we found a table-level caption (e.g. "Atmospheric pressure comparison"), use it
+        if table_caption:
+            section_label = table_caption
+        # All headers from the last header row are the column names
+        # (they align with data cells after the row-label cell)
+        value_cols = headers  # full list: e.g. ["kilopascal", "psi"]
+
+        # ── Build one line per data row ─────────────────────────────
+        lines = []
+        header_row_set = set(id(r) for r in header_rows)  # exclude ALL header rows
+        data_rows = [r for r in rows if id(r) not in header_row_set]
+        for row in data_rows:
+            cells = row.find_all(["td", "th"])
+            if not cells:
+                continue
+            cell_texts = [re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in cells]
+            cell_texts = [re.sub(r"\[\d+\]", "", t).strip() for t in cell_texts]
+
+            if not cell_texts[0]:   # skip blank rows
+                continue
+
+            row_label = cell_texts[0]
+            parts = [row_label]
+            for col_name, val in zip(value_cols, cell_texts[1:]):
+                if val and col_name:
+                    parts.append(f"{col_name}: {val}")
+            lines.append(" | ".join(parts))
+
+        if not lines:
+            continue
+
+        chunk = f"{section_label}:\n" + "\n".join(lines)
+        table_chunks.append(chunk)
+        logger.info(f"[TABLE] Chunk created — '{section_label}' ({len(lines)} rows)")
+
+    logger.info(f"[TABLE] Total table chunks created: {len(table_chunks)}")
+    return table_chunks
+
+
 def scrape_wikipedia(title: str) -> dict:
-    ck = _ck(f"scrape_{title}")
+    # Version tag — bump this to invalidate caches when extraction logic changes
+    CACHE_VERSION = "v2"
+    ck = _ck(f"scrape_{CACHE_VERSION}_{title}")
     cached = cache_get(ck)
     if cached:
         logger.info(f"Cache hit: {title}")
@@ -157,6 +280,7 @@ def scrape_wikipedia(title: str) -> dict:
 
     soup = BeautifulSoup(resp.text, "html.parser")
     table_count = len(soup.find_all("table"))
+    logger.info(f"[SCRAPE] Total tables on page (before noise removal): {table_count}")
 
     # Infobox
     infobox_data = {}
@@ -170,7 +294,14 @@ def scrape_wikipedia(title: str) -> dict:
                 if k and v:
                     infobox_data[k] = v
 
-    # Remove noise
+    content = soup.find("div", id="mw-content-text")
+    if not content:
+        return {"error": "Could not find main content div."}
+
+    # ── Extract table chunks BEFORE removing noise elements ─────────
+    table_chunks = extract_table_chunks(content)
+
+    # Remove noise (after table extraction so we don't lose content tables)
     for sel in ["sup", "div.navbox", "div.reflist", "table.navbox", "table.ambox",
                 "div.hatnote", "div.toc", "div.mw-references-wrap", "div.thumb",
                 "span.noprint", "div.noprint", "div.mw-editsection"]:
@@ -178,7 +309,6 @@ def scrape_wikipedia(title: str) -> dict:
             el.decompose()
 
     paragraphs = []
-    content = soup.find("div", id="mw-content-text")
     if content:
         for p in content.find_all("p"):
             text = p.get_text(" ", strip=True)
@@ -190,6 +320,7 @@ def scrape_wikipedia(title: str) -> dict:
     result = {
         "title": title, "url": url,
         "paragraphs": paragraphs,
+        "table_chunks": table_chunks,
         "table_count": table_count,
         "infobox": infobox_data,
     }
@@ -210,19 +341,25 @@ def chunk_text(paragraphs: list, max_words: int = 300) -> list:
         chunks.append(" ".join(cur))
     return chunks
 
-def build_index(title: str, paragraphs: list):
+def build_index(title: str, paragraphs: list, table_chunks: list = None):
     if title in article_store:
         return
-    ck = _ck(f"chunks_{title}")
+    CACHE_VERSION = "v2"
+    ck = _ck(f"chunks_{CACHE_VERSION}_{title}")
     cached = cache_get(ck)
     if cached:
         article_store[title] = {"chunks": cached["chunks"]}
-        logger.info(f"Loaded chunks from cache: {title}")
+        logger.info(f"Loaded chunks from cache: {title} ({len(cached['chunks'])} total chunks)")
         return
-    chunks = chunk_text(paragraphs)
-    article_store[title] = {"chunks": chunks}
-    cache_set(ck, {"chunks": chunks})
-    logger.info(f"Indexed {len(chunks)} chunks for: {title}")
+    para_chunks = chunk_text(paragraphs)
+    tbl_chunks = table_chunks or []
+    all_chunks = para_chunks + tbl_chunks
+    article_store[title] = {"chunks": all_chunks}
+    cache_set(ck, {"chunks": all_chunks})
+    logger.info(
+        f"[INDEX] '{title}': {len(para_chunks)} paragraph chunks + "
+        f"{len(tbl_chunks)} table chunks = {len(all_chunks)} total"
+    )
 
 # ── LLM with model rotation ─────────────────────────────────────
 
@@ -317,11 +454,12 @@ def search():
     article = scrape_wikipedia(title)
     if "error" in article:
         return jsonify({"error": article["error"]}), 500
-    build_index(title, article["paragraphs"])
+    build_index(title, article["paragraphs"], article.get("table_chunks", []))
     return jsonify({
         "title": title,
         "url": article["url"],
         "table_count": article["table_count"],
+        "table_chunk_count": len(article.get("table_chunks", [])),
         "chunk_count": len(article_store.get(title, {}).get("chunks", [])),
         "cached": False,
         "summary": article["paragraphs"][0] if article["paragraphs"] else "",
@@ -345,7 +483,7 @@ def chat():
     if "error" in article:
         return jsonify({"error": article["error"]}), 500
 
-    build_index(title, article["paragraphs"])
+    build_index(title, article["paragraphs"], article.get("table_chunks", []))
 
     all_chunks = article_store.get(title, {}).get("chunks", [])
     if not all_chunks:
@@ -359,6 +497,7 @@ def chat():
         "resolved_title": title,
         "answer": answer,
         "table_count": article["table_count"],
+        "table_chunk_count": len(article.get("table_chunks", [])),
         "chunks_used": len(top_chunks),
         "article_url": article["url"],
         "cached": False,
