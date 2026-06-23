@@ -118,6 +118,7 @@ def cache_set(key: str, data: dict):
 # ── Wikipedia helpers ───────────────────────────────────────────
 
 def wikipedia_search(query: str) -> list:
+    """OpenSearch autocomplete — fast but requires near-exact spelling."""
     url = "https://en.wikipedia.org/w/api.php"
     params = {"action": "opensearch", "search": query,
                "limit": 10, "namespace": 0, "format": "json"}
@@ -127,7 +128,29 @@ def wikipedia_search(query: str) -> list:
         data = r.json()
         return data[1] if len(data) > 1 else []
     except Exception as e:
-        logger.error(f"WP search error: {e}")
+        logger.error(f"WP opensearch error: {e}")
+        return []
+
+def wikipedia_fulltext_search(query: str) -> list:
+    """Full-text search with typo tolerance — handles misspellings."""
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "srlimit": 10,
+        "srnamespace": 0,
+        "srqiprofile": "classic_noboostlinks",  # handles fuzzy/typos
+        "format": "json",
+    }
+    try:
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("query", {}).get("search", [])
+        return [item["title"] for item in results]
+    except Exception as e:
+        logger.error(f"WP fulltext search error: {e}")
         return []
 
 def resolve_title(query: str) -> Optional[str]:
@@ -135,13 +158,24 @@ def resolve_title(query: str) -> Optional[str]:
     cached = cache_get(ck)
     if cached:
         return cached.get("title")
+
+    # 1. Try OpenSearch (fast, autocomplete)
     candidates = wikipedia_search(query)
+
+    # 2. Try with underscores
     if not candidates:
         candidates = wikipedia_search(query.replace(" ", "_"))
+
+    # 3. Fall back to full-text search (typo-tolerant)
+    if not candidates:
+        candidates = wikipedia_fulltext_search(query)
+
     if not candidates:
         return None
+
+    # Pick best fuzzy match, but fall back to top result if no strong match
     best = process.extractOne(query, candidates, scorer=fuzz.WRatio)
-    title = best[0] if (best and best[1] >= 60) else candidates[0]
+    title = best[0] if (best and best[1] >= 40) else candidates[0]
     cache_set(ck, {"title": title})
     time.sleep(RATE_LIMIT_DELAY)
     return title
