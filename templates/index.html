@@ -508,7 +508,7 @@ window.addEventListener('scroll',()=>{
 },{passive:true});
 
 /* ── APP ── */
-const S = {query:'', loading:false};
+const S = {query:'', loading:false, history:[]};
 const $ = id => document.getElementById(id);
 const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
@@ -560,7 +560,8 @@ async function doSearch(){
     const res=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
     const d=await res.json();
     if(!res.ok){toast(d.error||'Search failed','err');return;}
-    S.query=q; $('an').textContent=d.title; $('al').href=d.url;
+    S.query=q; S.history=[];
+    $('an').textContent=d.title; $('al').href=d.url;
     $('stage').classList.add('on'); $('qbar').classList.add('on');
     $('chat').innerHTML='';
     setTimeout(()=>$('stage').scrollIntoView({behavior:'smooth',block:'start'}),100);
@@ -576,10 +577,17 @@ async function doAsk(){
   if(!question||!S.query||S.loading) return;
   S.loading=true; $('ab').disabled=true; $('qi').value='';
   addMsg('user',question); addLoader();
+  const historyToSend = S.history.slice(-10);
   try{
-    const res=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:S.query,question})});
+    const res=await fetch('/api/ask',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({query:S.query, question, history: historyToSend})
+    });
     const d=await res.json(); rmLoader();
     if(!res.ok){addMsg('bot','⚠ '+(d.error||'Something went wrong.'));return;}
+    S.history.push({role:'user', content: question});
+    S.history.push({role:'assistant', content: d.answer});
     addMsg('bot',d.answer);
   } catch{ rmLoader(); addMsg('bot','⚠ Network error — is the backend running?'); }
   finally{ S.loading=false; $('ab').disabled=false; $('qi').focus(); }

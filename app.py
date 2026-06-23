@@ -363,12 +363,93 @@ def build_index(title: str, paragraphs: list, table_chunks: list = None):
 
 # ── LLM with model rotation ─────────────────────────────────────
 
-def answer_with_llm(question: str, chunks: list, title: str, infobox: dict) -> str:
-    qa_key = _ck(f"qa_{title}_{question}")
-    cached = cache_get(qa_key)
-    if cached and cached.get("answer"):
-        logger.info("QA cache hit")
-        return cached["answer"]
+def _strip_markdown(text: str) -> str:
+    """Remove markdown formatting that models add despite instructions."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)           # **bold**
+    text = re.sub(r'__(.+?)__', r'\1', text)               # __bold__
+    text = re.sub(r'\*(.+?)\*', r'\1', text)               # *italic*
+    text = re.sub(r'_(.+?)_', r'\1', text)                 # _italic_
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)  # # headers
+    text = re.sub(r'^[-•]\s+', '• ', text, flags=re.MULTILINE)  # bullets
+    text = re.sub(r'\n{3,}', '\n\n', text)                 # excess blank lines
+    return text.strip()
+
+
+def _try_llm_call(model: str, messages: list, max_tokens: int = 600) -> Optional[str]:
+    """Attempt a single LLM call. Returns response text or None on failure."""
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.1,
+        max_tokens=max_tokens,
+        timeout=45,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def rewrite_question(question: str, history: list) -> str:
+    """
+    If the question is a short follow-up (like "in kilopascal?"),
+    use the conversation history to rewrite it as a fully self-contained question.
+    Returns the rewritten question, or the original if no rewrite is needed.
+    """
+    # Only attempt rewrite for short / pronoun-heavy questions
+    words = question.split()
+    has_pronoun = any(w.lower() in ('it', 'its', 'that', 'this', 'they', 'them',
+                                     'those', 'same', 'there', 'he', 'she',
+                                     'what', 'which') for w in words)
+    is_short = len(words) <= 7
+    starts_with_preposition = words[0].lower() in ('in', 'at', 'by', 'to', 'of',
+                                                     'for', 'from', 'with', 'about',
+                                                     'what', 'how', 'why', 'when',
+                                                     'where', 'and', 'but')
+
+    if not history or (not has_pronoun and not is_short and not starts_with_preposition):
+        return question  # standalone question, no rewrite needed
+
+    # Build a compact history string (last 6 turns max)
+    history_text = ""
+    for turn in history[-6:]:
+        role = "User" if turn["role"] == "user" else "Assistant"
+        history_text += f"{role}: {turn['content']}\n"
+
+    rewrite_prompt = (
+        f"Given this conversation:\n{history_text}\n"
+        f"The user now asks: \"{question}\"\n"
+        "Rewrite this as a single, fully self-contained question that includes all "
+        "necessary context from the conversation. "
+        "Return ONLY the rewritten question, nothing else."
+    )
+
+    for model in FREE_MODELS:
+        try:
+            rewritten = _try_llm_call(
+                model,
+                [{"role": "user", "content": rewrite_prompt}],
+                max_tokens=80
+            )
+            if rewritten:
+                rewritten = rewritten.strip().strip('"').strip("'")
+                logger.info(f"[REWRITE] '{question}' → '{rewritten}'")
+                return rewritten
+        except RateLimitError:
+            continue
+        except Exception as e:
+            logger.warning(f"Rewrite failed on {model}: {e}")
+            continue
+
+    return question  # fallback: use original
+
+
+def answer_with_llm(question: str, chunks: list, title: str, infobox: dict,
+                    history: list = None) -> str:
+    # Only cache standalone questions (no history context)
+    qa_key = _ck(f"qa_{title}_{question}") if not history else None
+    if qa_key:
+        cached = cache_get(qa_key)
+        if cached and cached.get("answer"):
+            logger.info("QA cache hit")
+            return cached["answer"]
 
     context = "\n\n---\n\n".join(chunks)
     ib = ""
@@ -388,12 +469,17 @@ def answer_with_llm(question: str, chunks: list, title: str, infobox: dict) -> s
         "  6. Be concise and direct."
     )
 
-    user_msg = f"""{ib}WIKIPEDIA CONTEXT:
-{context}
+    context_block = f"{ib}WIKIPEDIA CONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER (plain text only, no markdown):"
 
-QUESTION: {question}
+    # Build messages: system + optional prior turns + current question
+    messages = [{"role": "system", "content": system_msg}]
 
-ANSWER (plain text only, no markdown):"""
+    if history:
+        # Inject prior conversation turns (last 6 turns) before the context block
+        for turn in history[-6:]:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+
+    messages.append({"role": "user", "content": context_block})
 
     for i, model in enumerate(FREE_MODELS):
         if i > 0:
@@ -402,27 +488,10 @@ ANSWER (plain text only, no markdown):"""
             time.sleep(wait)
         try:
             logger.info(f"Trying: {model}")
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user",   "content": user_msg},
-                ],
-                temperature=0.1,
-                max_tokens=600,
-                timeout=45,
-            )
-            answer = resp.choices[0].message.content.strip()
-            # Strip markdown that models add despite being told not to
-            answer = re.sub(r'\*\*(.+?)\*\*', r'\1', answer)           # **bold**
-            answer = re.sub(r'__(.+?)__', r'\1', answer)               # __bold__
-            answer = re.sub(r'\*(.+?)\*', r'\1', answer)               # *italic*
-            answer = re.sub(r'_(.+?)_', r'\1', answer)                 # _italic_
-            answer = re.sub(r'^#{1,6}\s+', '', answer, flags=re.MULTILINE)  # # headers
-            answer = re.sub(r'^[-•]\s+', '• ', answer, flags=re.MULTILINE)  # bullets
-            answer = re.sub(r'\n{3,}', '\n\n', answer)                 # excess blank lines
-            answer = answer.strip()
-            cache_set(qa_key, {"answer": answer, "model": model})
+            answer = _try_llm_call(model, messages)
+            answer = _strip_markdown(answer)
+            if qa_key:
+                cache_set(qa_key, {"answer": answer, "model": model})
             logger.info(f"✓ Answer from {model}")
             return answer
         except RateLimitError:
@@ -471,10 +540,11 @@ def chat():
     data = request.json or {}
     query = (data.get("query") or data.get("title") or "").strip()
     question = (data.get("question") or "").strip()
+    history = data.get("history") or []  # list of {role, content} dicts
     if not query or not question:
         return jsonify({"error": "query and question are required"}), 400
 
-    logger.info(f"Q: {question} | Topic: {query}")
+    logger.info(f"Q: {question} | Topic: {query} | History turns: {len(history)}")
     title = resolve_title(query)
     if not title:
         return jsonify({"error": f"No Wikipedia article found for '{query}'"}), 404
@@ -489,12 +559,20 @@ def chat():
     if not all_chunks:
         return jsonify({"error": "No content found."}), 404
 
-    top_chunks = retrieve_chunks_bm25(all_chunks, question, top_k=12)
-    answer = answer_with_llm(question, top_chunks, title, article.get("infobox", {}))
+    # Rewrite ambiguous follow-up questions using conversation history
+    resolved_question = rewrite_question(question, history) if history else question
+
+    top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=12)
+    answer = answer_with_llm(
+        resolved_question, top_chunks, title,
+        article.get("infobox", {}),
+        history=history
+    )
 
     return jsonify({
         "query": query,
         "resolved_title": title,
+        "resolved_question": resolved_question,
         "answer": answer,
         "table_count": article["table_count"],
         "table_chunk_count": len(article.get("table_chunks", [])),
