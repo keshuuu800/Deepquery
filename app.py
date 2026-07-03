@@ -42,6 +42,7 @@ FREE_MODELS = [
     "google/gemma-3-27b-it:free",
     "qwen/qwen3-8b:free",
     "deepseek/deepseek-r1-0528:free",
+    
 ]
 
 client = OpenAI(
@@ -609,6 +610,24 @@ def answer_with_llm(question: str, chunks: list, title: str, infobox: dict,
         except Exception as e:
             logger.error(f"Error on {model}: {e}")
             continue
+    # All free models failed. Try a configured OpenRouter fallback model (if set),
+    # otherwise attempt a reasonable default. This lets users provide an
+    # alternate model via OPENROUTER_FALLBACK_MODEL environment variable.
+    fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL")
+    if not fallback_model:
+        # sensible default for OpenRouter users; can be overridden by env var
+        fallback_model = os.getenv("OPENROUTER_FALLBACK", "openai/gpt-3.5-turbo")
+
+    try:
+        logger.info(f"Trying fallback model: {fallback_model}")
+        answer = _try_llm_call(fallback_model, messages)
+        answer = _strip_markdown(answer)
+        if qa_key:
+            cache_set(qa_key, {"answer": answer, "model": fallback_model})
+        logger.info(f"✓ Answer from fallback {fallback_model}")
+        return answer
+    except Exception as e:
+        logger.warning(f"Fallback {fallback_model} failed: {e}")
 
     return (
         "All free AI models are currently rate-limited. "
