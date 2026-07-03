@@ -286,16 +286,29 @@ def extract_table_chunks(content_div) -> list:
             if not cells:
                 continue
             cell_texts = [re.sub(r"\s+", " ", c.get_text(" ", strip=True)) for c in cells]
-            cell_texts = [re.sub(r"\[\d+\]", "", t).strip() for t in cell_texts]
+            # remove any bracketed reference markers like [12], [ 12 ], [156][181], etc.
+            cell_texts = [re.sub(r"\[[^\]]*\]", "", t).strip() for t in cell_texts]
 
-            if not cell_texts[0]:   # skip blank rows
+            if not cell_texts or not cell_texts[0]:   # skip blank rows
                 continue
 
-            row_label = cell_texts[0]
-            parts = [row_label]
-            for col_name, val in zip(value_cols, cell_texts[1:]):
-                if val and col_name:
-                    parts.append(f"{col_name}: {val}")
+            # Align headers with cell values. Some tables use a separate row-label
+            # (e.g. first cell is the row name) while others have headers for every
+            # column. Handle both cases:
+            parts = []
+            if len(cell_texts) == len(value_cols):
+                # full alignment: header_i -> cell_i
+                parts = [f"{h}: {v}" for h, v in zip(value_cols, cell_texts) if h and v]
+            elif len(cell_texts) == len(value_cols) + 1:
+                # first cell is a row label, remaining map to headers
+                row_label = cell_texts[0]
+                parts = [row_label] + [f"{h}: {v}" for h, v in zip(value_cols, cell_texts[1:]) if h and v]
+            else:
+                # fallback: join available cells
+                parts = [c for c in cell_texts if c]
+
+            if len(parts) < 1:
+                continue
             lines.append(" | ".join(parts))
 
         if not lines:
