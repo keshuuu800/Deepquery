@@ -247,6 +247,9 @@ body{font-family:'Inter',sans-serif;color:#e8f4f2}
   border-bottom:1px solid rgba(14,181,160,.06);
   animation:fadeUp .3s ease both;
 }
+.msg.user{flex-direction:row-reverse;}
+.msg.user .mb{text-align:right}
+.msg.user .mt{background:rgba(0,6,10,0.72);border-color:rgba(0,0,0,0.25);color:rgba(232,244,242,0.96)}
 .msg-lbl{
   flex-shrink:0;width:34px;font-size:.58rem;
   letter-spacing:.12em;text-transform:uppercase;
@@ -272,6 +275,13 @@ body{font-family:'Inter',sans-serif;color:#e8f4f2}
   color:rgba(168,230,223,0.95);
 }
 .mt p{margin-bottom:.5em}.mt p:last-child{margin-bottom:0}
+
+.answer-media{margin-bottom:.6rem}
+.answer-media img{max-width:320px;border-radius:8px;display:block}
+/* Lightbox */
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;align-items:center;justify-content:center;z-index:300}
+.lightbox img{max-width:92%;max-height:86%;border-radius:6px}
+.lightbox .caption{color:#cfeee9;margin-top:.6rem;text-align:center}
 
 /* ── DOTS ── */
 .dots{display:flex;gap:5px;padding:.25rem 0}
@@ -531,7 +541,7 @@ function toast(msg,type=''){
   clearTimeout(_tt); _tt=setTimeout(()=>el.className='',3200);
 }
 
-function addMsg(role,text){
+function addMsg(role,text,image){
   const w=document.createElement('div'); w.className='msg '+role;
   // Format plain text: handle newlines and bullet points nicely
   function formatText(t){
@@ -544,9 +554,30 @@ function addMsg(role,text){
       return `<p>${line}</p>`;
     }).join('');
   }
+  // include image for bot answers when available. `image` may be a URL or an object
+  let mediaHtml = '';
+  if(role==='bot' && image){
+    if(typeof image === 'string'){
+      mediaHtml = `<div class="answer-media"><img src="${esc(image)}" alt="" data-large="${esc(image)}"/></div>`;
+    } else if(Array.isArray(image) && image.length){
+      // show top image and small thumbnails for alternatives
+      const top = image[0];
+      mediaHtml = `<div class="answer-media"><img src="${esc(top.url)}" alt="${esc(top.alt||top.section||'')||''}" data-large="${esc(top.url)}"/></div>`;
+      // thumbnails
+      if(image.length>1){
+        mediaHtml += `<div style="display:flex;gap:8px;margin-top:6px">`;
+        image.slice(1,5).forEach(it=>{
+          mediaHtml += `<img src="${esc(it.url)}" alt="${esc(it.alt||it.section||'')}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;cursor:pointer" data-large="${esc(it.url)}"/>`;
+        });
+        mediaHtml += `</div>`;
+      }
+    } else if(typeof image === 'object' && image.url){
+      mediaHtml = `<div class="answer-media"><img src="${esc(image.url)}" alt="${esc(image.alt||image.section||'')}" data-large="${esc(image.url)}"/></div>`;
+    }
+  }
   w.innerHTML=`<div class="msg-lbl">${role==='user'?'You':'Deep'}</div>
     <div class="mb"><div class="mr">${role==='user'?'Question':'Answer'}</div>
-    <div class="mt">${formatText(text)}</div></div>`;
+    <div class="mt">${mediaHtml}${formatText(text)}</div></div>`;
   $('chat').appendChild(w); w.scrollIntoView({behavior:'smooth',block:'end'});
 }
 function addLoader(){
@@ -601,9 +632,35 @@ async function doAsk(){
     if(!res.ok){addMsg('bot','⚠ '+(d.error||'Something went wrong.'));return;}
     S.history.push({role:'user', content: question});
     S.history.push({role:'assistant', content: d.answer});
-    addMsg('bot',d.answer);
+    // prefer server-provided ranked list (`d.images`) for richer UI, fallback to `d.image`
+    const imgs = (d.images && d.images.length) ? d.images : (d.image ? [{url: d.image, alt: ''}] : []);
+    addMsg('bot', d.answer, imgs.length? imgs : (d.image || d.image_url || null));
+    // attach click handlers for lightbox
+    setTimeout(()=>{
+      document.querySelectorAll('.answer-media img').forEach(imgEl=>{
+        imgEl.style.cursor = 'zoom-in';
+        imgEl.addEventListener('click', ()=>openLightbox(imgEl.dataset.large || imgEl.src, imgEl.alt || ''));
+      });
+      document.querySelectorAll('.answer-media img[style]').forEach(th=>{
+        th.addEventListener('click', ()=>openLightbox(th.dataset.large || th.src, th.alt || ''));
+      });
+    },80);
   } catch{ rmLoader(); addMsg('bot','⚠ Network error — is the backend running?'); }
   finally{ S.loading=false; $('ab').disabled=false; $('qi').focus(); }
+}
+
+// Simple lightbox
+function openLightbox(src, caption){
+  let lb = document.getElementById('lb');
+  if(!lb){
+    lb = document.createElement('div'); lb.id='lb'; lb.className='lightbox';
+    lb.innerHTML = `<div style="text-align:center"><img id="lbimg" src="" alt=""/><div class="caption" id="lbcap"></div></div>`;
+    document.body.appendChild(lb);
+    lb.addEventListener('click', ()=>{ lb.style.display='none'; });
+  }
+  document.getElementById('lbimg').src = src;
+  document.getElementById('lbcap').textContent = caption || '';
+  lb.style.display = 'flex';
 }
 </script>
 </body>

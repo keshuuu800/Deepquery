@@ -366,6 +366,17 @@ def scrape_wikipedia(title: str) -> dict:
     # ── Extract table chunks BEFORE removing noise elements ─────────
     table_chunks = extract_table_chunks(content)
 
+    # Extract in-article images with their nearest section heading and alt text
+    images = []
+    for img in content.find_all('img'):
+        src = img.get('src') or img.get('data-src') or ''
+        url_abs = _make_absolute_url(src)
+        if not url_abs:
+            continue
+        alt = img.get('alt') or ''
+        section = _get_section_heading(img)
+        images.append({"url": url_abs, "alt": alt, "section": section})
+
     # Remove noise (after table extraction so we don't lose content tables)
     for sel in ["sup", "div.navbox", "div.reflist", "table.navbox", "table.ambox",
                 "div.hatnote", "div.toc", "div.mw-references-wrap", "div.thumb",
@@ -389,6 +400,7 @@ def scrape_wikipedia(title: str) -> dict:
         "table_count": table_count,
         "infobox": infobox_data,
         "image_url": image_url,
+        "images": images,
     }
     cache_set(ck, result)
     return result
@@ -636,6 +648,34 @@ def chat():
         history=history
     )
 
+    # Score and rank article images by relevance to the resolved question.
+    imgs = article.get("images") or []
+    scored_images = []
+    for im in imgs:
+        fname = (im.get("url") or "").split('/')[-1]
+        candidate = f"{im.get('section','')} {im.get('alt','')} {fname}"
+        try:
+            score = float(fuzz.WRatio(resolved_question, candidate))
+        except Exception:
+            score = 0.0
+        if im.get('url'):
+            scored_images.append({
+                "url": im.get('url'),
+                "alt": im.get('alt',''),
+                "section": im.get('section',''),
+                "score": round(score, 2),
+            })
+
+    # Sort by score descending and apply a soft threshold (keep plausible candidates)
+    scored_images.sort(key=lambda x: x['score'], reverse=True)
+
+    # If no good candidate, fallback to infobox image (if present)
+    top_image = None
+    if scored_images and scored_images[0]['score'] >= 35:
+        top_image = scored_images[0]['url']
+    elif article.get('image_url'):
+        top_image = article.get('image_url')
+
     return jsonify({
         "query": query,
         "resolved_title": title,
@@ -646,6 +686,8 @@ def chat():
         "chunks_used": len(top_chunks),
         "article_url": article["url"],
         "cached": False,
+        "image": top_image,
+        "images": scored_images,
     })
 
 @app.route("/api/health")
