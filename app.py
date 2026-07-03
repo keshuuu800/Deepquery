@@ -368,6 +368,35 @@ def scrape_wikipedia(title: str) -> dict:
 
     # Extract in-article images with their nearest section heading and alt text
     images = []
+    def _px_size_from_url(u: str) -> int:
+        m = re.search(r"/(\d+)px-", u)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return 0
+        m2 = re.search(r"(\d+)px-", u)
+        if m2:
+            try:
+                return int(m2.group(1))
+            except Exception:
+                return 0
+        return 0
+
+    def _is_decorative(u: str, alt: str) -> bool:
+        lower = (u or "").lower()
+        # common tiny icon patterns from Wikipedia/Commons
+        if any(k in lower for k in ("transparent", "nuvola", "maki-", "20px", "40px", "maps.wikimedia.org/img/osm", "thumb/20px", "thumb/40px")):
+            return True
+        # exclude very small thumbnails (px size embedded in URL)
+        px = _px_size_from_url(lower)
+        if px and px < 80:
+            return True
+        # exclude data URIs or empty
+        if lower.startswith('data:'):
+            return True
+        return False
+
     for img in content.find_all('img'):
         src = img.get('src') or img.get('data-src') or ''
         url_abs = _make_absolute_url(src)
@@ -375,6 +404,8 @@ def scrape_wikipedia(title: str) -> dict:
             continue
         alt = img.get('alt') or ''
         section = _get_section_heading(img)
+        if _is_decorative(url_abs, alt):
+            continue
         images.append({"url": url_abs, "alt": alt, "section": section})
 
     # Remove noise (after table extraction so we don't lose content tables)
