@@ -197,6 +197,22 @@ Request:
 
 ---
 
+## Hugging Face Spaces Deployment
+
+This app can be deployed on Hugging Face Spaces as a Flask-based Python app.
+
+Deployment steps:
+1. Push this repository to a new Hugging Face Space.
+2. In the Space settings, add `OPENROUTER_API_KEY` as a secret.
+3. The app uses `PORT` from the environment and is ready to run with the existing `app.py`.
+4. Optionally use the included `Dockerfile` for the `docker` runtime.
+
+Important:
+- Do not commit your real `.env` file.
+- Use `.env.example` for local development.
+
+---
+
 ## Author
 
 **Keshav Gupta**

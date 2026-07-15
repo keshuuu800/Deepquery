@@ -115,6 +115,19 @@ def cache_set(key: str, data: dict):
     with open(p, "w") as f:
         json.dump(data, f, ensure_ascii=False)
 
+
+def _make_absolute_url(src: str) -> Optional[str]:
+    if not src:
+        return None
+    src = src.strip()
+    if src.startswith('//'):
+        return 'https:' + src
+    if src.startswith('/'):
+        return 'https://en.wikipedia.org' + src
+    if src.startswith('http://') or src.startswith('https://'):
+        return src
+    return None
+
 # ── Wikipedia helpers ───────────────────────────────────────────
 
 def wikipedia_search(query: str) -> list:
@@ -231,7 +244,7 @@ def extract_table_chunks(content_div) -> list:
 
         if header_row:
             headers = [th.get_text(" ", strip=True) for th in header_row.find_all("th")]
-            headers = [re.sub(r"\s+", " ", h) for h in headers if h]
+            headers = [re.sub(r"\s+", " ", h).strip() for h in headers]
             # If multi-row headers exist, pull a human-readable label from row 0
             if len(header_rows) > 1:
                 first_ths = header_rows[0].find_all("th")
@@ -248,6 +261,7 @@ def extract_table_chunks(content_div) -> list:
             # No <th> headers — try first row as plain text labels
             first_cells = rows[0].find_all(["td", "th"])
             headers = [c.get_text(" ", strip=True) for c in first_cells]
+            headers = [re.sub(r"\s+", " ", h).strip() for h in headers]
             table_caption = None
 
         if len(headers) < 2:
@@ -318,6 +332,7 @@ def scrape_wikipedia(title: str) -> dict:
 
     # Infobox
     infobox_data = {}
+    image_url = None
     infobox = soup.find("table", class_=re.compile(r"infobox"))
     if infobox:
         for row in infobox.find_all("tr"):
@@ -327,6 +342,9 @@ def scrape_wikipedia(title: str) -> dict:
                 v = td.get_text(" ", strip=True)
                 if k and v:
                     infobox_data[k] = v
+        img = infobox.find("img")
+        if img:
+            image_url = _make_absolute_url(img.get("src") or img.get("data-src"))
 
     content = soup.find("div", id="mw-content-text")
     if not content:
@@ -357,6 +375,7 @@ def scrape_wikipedia(title: str) -> dict:
         "table_chunks": table_chunks,
         "table_count": table_count,
         "infobox": infobox_data,
+        "image_url": image_url,
     }
     cache_set(ck, result)
     return result
@@ -567,6 +586,7 @@ def search():
         "cached": False,
         "summary": article["paragraphs"][0] if article["paragraphs"] else "",
         "infobox": dict(list(article.get("infobox", {}).items())[:8]),
+        "image_url": article.get("image_url"),
     })
 
 @app.route("/api/ask", methods=["POST"])

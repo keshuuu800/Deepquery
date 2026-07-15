@@ -416,6 +416,9 @@ body{font-family:'Inter',sans-serif;color:#e8f4f2}
   <div id="stage">
     <div class="si2">
       <div class="ap">
+        <div class="article-media" id="article-media" style="display:none;">
+          <img id="article-img" src="" alt="Article image" loading="lazy"/>
+        </div>
         <div style="flex:1;min-width:160px">
           <div class="ap-lbl">Article loaded</div>
           <div class="ap-ttl" id="an">—</div>
@@ -562,6 +565,16 @@ async function doSearch(){
     if(!res.ok){toast(d.error||'Search failed','err');return;}
     S.query=q; S.history=[];
     $('an').textContent=d.title; $('al').href=d.url;
+    const imgEl = $('article-img');
+    const imgWrap = $('article-media');
+    if(d.image_url){
+      imgEl.src = d.image_url;
+      imgEl.alt = `Image for ${d.title}`;
+      imgWrap.style.display = 'block';
+    } else {
+      imgEl.src = '';
+      imgWrap.style.display = 'none';
+    }
     $('stage').classList.add('on'); $('qbar').classList.add('on');
     $('chat').innerHTML='';
     setTimeout(()=>$('stage').scrollIntoView({behavior:'smooth',block:'start'}),100);
