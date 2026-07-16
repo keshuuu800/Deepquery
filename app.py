@@ -35,7 +35,7 @@ CORS(app)
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-HEADERS = {"User-Agent": "WikiRAGBot/1.0 (Educational) requests/2.x"}
+HEADERS = {"User-Agent": "DeepQuery/2.0 (https://github.com/keshuuu800/Deepquery; keshavgupta1511@gmail.com) python-requests/2.x"}
 RATE_LIMIT_DELAY = 0.8
 
 # ── Groq primary models (fast, free tier) ───────────────────────
@@ -187,14 +187,29 @@ def _make_absolute_url(src: str) -> Optional[str]:
 
 # ── Wikipedia helpers ───────────────────────────────────────────
 
+def wikipedia_search_rest(query: str) -> list:
+    """Use Wikipedia REST API — works from datacenter IPs, no rate-limit block."""
+    try:
+        url = f"https://en.wikipedia.org/w/rest.php/v1/search/title"
+        r = requests.get(url, params={"q": query, "limit": 10},
+                         headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            return [p["title"] for p in data.get("pages", [])]
+    except Exception as e:
+        logger.warning(f"WP REST search error: {e}")
+    return []
+
 def wikipedia_search(query: str) -> list:
-    """OpenSearch autocomplete — fast but requires near-exact spelling."""
+    """OpenSearch autocomplete via w/api.php."""
     url = "https://en.wikipedia.org/w/api.php"
     params = {"action": "opensearch", "search": query,
                "limit": 10, "namespace": 0, "format": "json"}
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        r.raise_for_status()
+        if r.status_code != 200:
+            logger.warning(f"WP opensearch HTTP {r.status_code} for '{query}'")
+            return []
         data = r.json()
         return data[1] if len(data) > 1 else []
     except Exception as e:
@@ -202,7 +217,7 @@ def wikipedia_search(query: str) -> list:
         return []
 
 def wikipedia_fulltext_search(query: str) -> list:
-    """Full-text search with typo tolerance — handles misspellings."""
+    """Full-text search with typo tolerance via w/api.php."""
     url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "query",
@@ -210,12 +225,13 @@ def wikipedia_fulltext_search(query: str) -> list:
         "srsearch": query,
         "srlimit": 10,
         "srnamespace": 0,
-        "srqiprofile": "classic_noboostlinks",  # handles fuzzy/typos
         "format": "json",
     }
     try:
         r = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        r.raise_for_status()
+        if r.status_code != 200:
+            logger.warning(f"WP fulltext HTTP {r.status_code} for '{query}'")
+            return []
         data = r.json()
         results = data.get("query", {}).get("search", [])
         return [item["title"] for item in results]
@@ -229,21 +245,26 @@ def resolve_title(query: str) -> Optional[str]:
     if cached:
         return cached.get("title")
 
-    # 1. Try OpenSearch (fast, autocomplete)
-    candidates = wikipedia_search(query)
+    # 1. REST API — most reliable from datacenter IPs
+    candidates = wikipedia_search_rest(query)
 
-    # 2. Try with underscores
+    # 2. OpenSearch autocomplete
+    if not candidates:
+        candidates = wikipedia_search(query)
+
+    # 3. Try with underscores
     if not candidates:
         candidates = wikipedia_search(query.replace(" ", "_"))
 
-    # 3. Fall back to full-text search (typo-tolerant)
+    # 4. Full-text search fallback
     if not candidates:
         candidates = wikipedia_fulltext_search(query)
 
     if not candidates:
+        logger.error(f"resolve_title: no candidates found for '{query}'")
         return None
 
-    # Pick best fuzzy match, but fall back to top result if no strong match
+    # Pick best fuzzy match, fall back to top result
     best = process.extractOne(query, candidates, scorer=fuzz.WRatio)
     title = best[0] if (best and best[1] >= 40) else candidates[0]
     cache_set(ck, {"title": title})
