@@ -47,15 +47,9 @@ GROQ_MODELS = [
     "mixtral-8x7b-32768",
 ]
 
-# ── OpenRouter fallback models (used when Groq is rate-limited) ──
+# ── OpenRouter fallback — auto-routes to best free model ─────────
 OPENROUTER_MODELS = [
-    "openai/gpt-oss-20b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "google/gemma-3-27b-it:free",
-    "qwen/qwen3-8b:free",
-    "deepseek/deepseek-r1-0528:free",
+    "openrouter/auto:free",
 ]
 
 # Keep FREE_MODELS as alias for any legacy references
