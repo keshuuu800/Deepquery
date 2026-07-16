@@ -38,8 +38,17 @@ CACHE_DIR.mkdir(exist_ok=True)
 HEADERS = {"User-Agent": "WikiRAGBot/1.0 (Educational) requests/2.x"}
 RATE_LIMIT_DELAY = 0.8
 
-# ── Free model rotation list ────────────────────────────────────
-FREE_MODELS = [
+# ── Groq primary models (fast, free tier) ───────────────────────
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama3-70b-8192",
+    "gemma2-9b-it",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+]
+
+# ── OpenRouter fallback models (used when Groq is rate-limited) ──
+OPENROUTER_MODELS = [
     "openai/gpt-oss-20b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "meta-llama/llama-3.1-8b-instruct:free",
@@ -47,9 +56,18 @@ FREE_MODELS = [
     "google/gemma-3-27b-it:free",
     "qwen/qwen3-8b:free",
     "deepseek/deepseek-r1-0528:free",
-    
 ]
 
+# Keep FREE_MODELS as alias for any legacy references
+FREE_MODELS = GROQ_MODELS
+
+# Groq client (primary)
+groq_client = OpenAI(
+    api_key=os.getenv("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1",
+)
+
+# OpenRouter client (fallback)
 client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
     base_url="https://openrouter.ai/api/v1",
@@ -176,9 +194,11 @@ def expand_query_for_retrieval(question: str) -> list:
         "Return one query per line, no numbering, no extra text."
     )
 
-    for model in FREE_MODELS:
+    # Try Groq first, then OpenRouter on rate-limit
+    for model, llm_client in [(m, groq_client) for m in GROQ_MODELS] + [(m, client) for m in OPENROUTER_MODELS]:
         try:
-            resp = _try_llm_call(model, [{"role": "user", "content": prompt}], max_tokens=100)
+            resp = _try_llm_call(model, [{"role": "user", "content": prompt}],
+                                 max_tokens=100, llm_client=llm_client)
             if resp:
                 alt_queries = [q.strip() for q in resp.split("\n") if q.strip()]
                 queries.extend(alt_queries[:2])
@@ -596,9 +616,11 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def _try_llm_call(model: str, messages: list, max_tokens: int = 600) -> Optional[str]:
-    """Attempt a single LLM call. Returns response text or None on failure."""
-    resp = client.chat.completions.create(
+def _try_llm_call(model: str, messages: list, max_tokens: int = 600,
+                  llm_client=None) -> Optional[str]:
+    """Attempt a single LLM call. Uses groq_client by default."""
+    c = llm_client or groq_client
+    resp = c.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.1,
@@ -642,12 +664,13 @@ def rewrite_question(question: str, history: list) -> str:
         "Return ONLY the rewritten question, nothing else."
     )
 
-    for model in FREE_MODELS:
+    # Try Groq first, then OpenRouter on rate-limit
+    for model, llm_client in [(m, groq_client) for m in GROQ_MODELS] + [(m, client) for m in OPENROUTER_MODELS]:
         try:
             rewritten = _try_llm_call(
                 model,
                 [{"role": "user", "content": rewrite_prompt}],
-                max_tokens=80
+                max_tokens=80, llm_client=llm_client
             )
             if rewritten:
                 rewritten = rewritten.strip().strip('"').strip("'")
@@ -702,43 +725,44 @@ def answer_with_llm(question: str, chunks: list, title: str, infobox: dict,
 
     messages.append({"role": "user", "content": context_block})
 
-    for i, model in enumerate(FREE_MODELS):
+    # ── Step 1: Try all Groq models (primary) ───────────────────
+    for i, model in enumerate(GROQ_MODELS):
         if i > 0:
-            wait = min(2 ** i, 12)
-            logger.info(f"Waiting {wait}s before trying {model}…")
-            time.sleep(wait)
+            time.sleep(min(2 ** i, 8))
         try:
-            logger.info(f"Trying: {model}")
-            answer = _try_llm_call(model, messages)
+            logger.info(f"[GROQ] Trying: {model}")
+            answer = _try_llm_call(model, messages, llm_client=groq_client)
+            answer = _strip_markdown(answer)
+            if qa_key:
+                cache_set(qa_key, {"answer": answer, "model": f"groq/{model}"})
+            logger.info(f"✓ Answer from groq/{model}")
+            return answer
+        except RateLimitError:
+            logger.warning(f"[GROQ] 429 on {model} — rotating")
+            continue
+        except Exception as e:
+            logger.error(f"[GROQ] Error on {model}: {e}")
+            continue
+
+    # ── Step 2: Groq exhausted — fall back to OpenRouter :free ───
+    logger.info("[OPENROUTER] All Groq models rate-limited, switching to OpenRouter...")
+    for i, model in enumerate(OPENROUTER_MODELS):
+        if i > 0:
+            time.sleep(min(2 ** i, 12))
+        try:
+            logger.info(f"[OPENROUTER] Trying: {model}")
+            answer = _try_llm_call(model, messages, llm_client=client)
             answer = _strip_markdown(answer)
             if qa_key:
                 cache_set(qa_key, {"answer": answer, "model": model})
-            logger.info(f"✓ Answer from {model}")
+            logger.info(f"✓ Answer from openrouter/{model}")
             return answer
         except RateLimitError:
-            logger.warning(f"429 on {model} — rotating")
+            logger.warning(f"[OPENROUTER] 429 on {model} — rotating")
             continue
         except Exception as e:
-            logger.error(f"Error on {model}: {e}")
+            logger.error(f"[OPENROUTER] Error on {model}: {e}")
             continue
-    # All free models failed. Try a configured OpenRouter fallback model (if set),
-    # otherwise attempt a reasonable default. This lets users provide an
-    # alternate model via OPENROUTER_FALLBACK_MODEL environment variable.
-    fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL")
-    if not fallback_model:
-        # sensible default for OpenRouter users; can be overridden by env var
-        fallback_model = os.getenv("OPENROUTER_FALLBACK", "openai/gpt-3.5-turbo")
-
-    try:
-        logger.info(f"Trying fallback model: {fallback_model}")
-        answer = _try_llm_call(fallback_model, messages)
-        answer = _strip_markdown(answer)
-        if qa_key:
-            cache_set(qa_key, {"answer": answer, "model": fallback_model})
-        logger.info(f"✓ Answer from fallback {fallback_model}")
-        return answer
-    except Exception as e:
-        logger.warning(f"Fallback {fallback_model} failed: {e}")
 
     return (
         "All free AI models are currently rate-limited. "
