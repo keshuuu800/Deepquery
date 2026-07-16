@@ -554,26 +554,10 @@ function addMsg(role,text,image){
       return `<p>${line}</p>`;
     }).join('');
   }
-  // include image for bot answers when available. `image` may be a URL or an object
+  // Show single relevant image for bot answers (only when backend confirmed a match)
   let mediaHtml = '';
-  if(role==='bot' && image){
-    if(typeof image === 'string'){
-      mediaHtml = `<div class="answer-media"><img src="${esc(image)}" alt="" data-large="${esc(image)}"/></div>`;
-    } else if(Array.isArray(image) && image.length){
-      // show top image and small thumbnails for alternatives
-      const top = image[0];
-      mediaHtml = `<div class="answer-media"><img src="${esc(top.url)}" alt="${esc(top.alt||top.section||'')||''}" data-large="${esc(top.url)}"/></div>`;
-      // thumbnails
-      if(image.length>1){
-        mediaHtml += `<div style="display:flex;gap:8px;margin-top:6px">`;
-        image.slice(1,5).forEach(it=>{
-          mediaHtml += `<img src="${esc(it.url)}" alt="${esc(it.alt||it.section||'')}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;cursor:pointer" data-large="${esc(it.url)}"/>`;
-        });
-        mediaHtml += `</div>`;
-      }
-    } else if(typeof image === 'object' && image.url){
-      mediaHtml = `<div class="answer-media"><img src="${esc(image.url)}" alt="${esc(image.alt||image.section||'')}" data-large="${esc(image.url)}"/></div>`;
-    }
+  if(role==='bot' && image && typeof image === 'string'){
+    mediaHtml = `<div class="answer-media"><img src="${esc(image)}" alt="" style="cursor:zoom-in" onclick="openLightbox('${esc(image)}','')" onerror="this.parentElement.style.display='none'"/></div>`;
   }
   w.innerHTML=`<div class="msg-lbl">${role==='user'?'You':'Deep'}</div>
     <div class="mb"><div class="mr">${role==='user'?'Question':'Answer'}</div>
@@ -632,19 +616,8 @@ async function doAsk(){
     if(!res.ok){addMsg('bot','⚠ '+(d.error||'Something went wrong.'));return;}
     S.history.push({role:'user', content: question});
     S.history.push({role:'assistant', content: d.answer});
-    // prefer server-provided ranked list (`d.images`) for richer UI, fallback to `d.image`
-    const imgs = (d.images && d.images.length) ? d.images : (d.image ? [{url: d.image, alt: ''}] : []);
-    addMsg('bot', d.answer, imgs.length? imgs : (d.image || d.image_url || null));
-    // attach click handlers for lightbox
-    setTimeout(()=>{
-      document.querySelectorAll('.answer-media img').forEach(imgEl=>{
-        imgEl.style.cursor = 'zoom-in';
-        imgEl.addEventListener('click', ()=>openLightbox(imgEl.dataset.large || imgEl.src, imgEl.alt || ''));
-      });
-      document.querySelectorAll('.answer-media img[style]').forEach(th=>{
-        th.addEventListener('click', ()=>openLightbox(th.dataset.large || th.src, th.alt || ''));
-      });
-    },80);
+    // Pass only d.image (single URL string or null) — no thumbnail arrays
+    addMsg('bot', d.answer, d.image || null);
   } catch{ rmLoader(); addMsg('bot','⚠ Network error — is the backend running?'); }
   finally{ S.loading=false; $('ab').disabled=false; $('qi').focus(); }
 }

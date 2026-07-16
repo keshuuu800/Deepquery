@@ -768,33 +768,32 @@ def chat():
         history=history
     )
 
-    # Score and rank article images by relevance to the resolved question.
+    # Context-based image: score against question + answer combined
+    # Only show image when it is clearly relevant (threshold 60+)
     imgs = article.get("images") or []
-    scored_images = []
-    for im in imgs:
-        fname = (im.get("url") or "").split('/')[-1]
-        candidate = f"{im.get('section','')} {im.get('alt','')} {fname}"
-        try:
-            score = float(fuzz.WRatio(resolved_question, candidate))
-        except Exception:
-            score = 0.0
-        if im.get('url'):
-            scored_images.append({
-                "url": im.get('url'),
-                "alt": im.get('alt',''),
-                "section": im.get('section',''),
-                "score": round(score, 2),
-            })
-
-    # Sort by score descending and apply a soft threshold (keep plausible candidates)
-    scored_images.sort(key=lambda x: x['score'], reverse=True)
-
-    # If no good candidate, fallback to infobox image (if present)
     top_image = None
-    if scored_images and scored_images[0]['score'] >= 35:
-        top_image = scored_images[0]['url']
-    elif article.get('image_url'):
-        top_image = article.get('image_url')
+
+    answer_is_not_found = answer.strip().lower().startswith("information not found")
+
+    if imgs and not answer_is_not_found:
+        context_text = f"{resolved_question} {answer[:300]}"
+        best_score = 0
+        best_img = None
+        for im in imgs:
+            candidate = f"{im.get('section','')} {im.get('alt','')}"
+            if not candidate.strip() or not im.get('url'):
+                continue
+            try:
+                score = float(fuzz.WRatio(context_text, candidate))
+            except Exception:
+                score = 0.0
+            if score > best_score:
+                best_score = score
+                best_img = im
+
+        # Only show image if it's a confident match (>=60)
+        if best_img and best_score >= 60:
+            top_image = best_img.get('url')
 
     return jsonify({
         "query": query,
@@ -807,7 +806,6 @@ def chat():
         "article_url": article["url"],
         "cached": False,
         "image": top_image,
-        "images": scored_images,
     })
 
 @app.route("/api/health")
