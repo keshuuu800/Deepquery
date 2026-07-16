@@ -22,7 +22,7 @@ from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from rapidfuzz import process, fuzz
 from openai import OpenAI, RateLimitError
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import SentenceTransformer
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -69,7 +69,6 @@ client = OpenAI(
 
 # ── Embedding model for dense retrieval ─────────────────────────
 EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 RRF_K = 60  # constant for Reciprocal Rank Fusion
 
 # ── In-memory store ─────────────────────────────────────────────
@@ -152,71 +151,6 @@ def hybrid_retrieve(chunks: list, embeddings: np.ndarray, question: str, top_k: 
         f"→ {len(reranked)} merged → top {top_k}"
     )
     return reranked[:top_k]
-
-# ══════════════════════════════════════════════════════════════
-#  CROSS-ENCODER RE-RANKER
-# ══════════════════════════════════════════════════════════════
-
-def rerank_chunks(question: str, chunks: list, top_k: int = 8) -> list:
-    if not chunks:
-        return chunks
-    pairs = [[question, c] for c in chunks]
-    try:
-        scores = CROSS_ENCODER.predict(pairs, show_progress_bar=False)
-        scored = list(zip(scores, chunks))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        reranked = [c for _, c in scored[:top_k]]
-        logger.info(f"[RERANK] {len(chunks)} → {len(reranked)}  (top score: {scored[0][0]:.3f})")
-        return reranked
-    except Exception as e:
-        logger.warning(f"[RERANK] Failed: {e} — falling back to top {top_k}")
-        return chunks[:top_k]
-
-# ══════════════════════════════════════════════════════════════
-#  LLM-BASED QUERY EXPANSION for retrieval
-# ══════════════════════════════════════════════════════════════
-
-def expand_query_for_retrieval(question: str) -> list:
-    queries = [question]
-    if len(question.split()) < 3:
-        return queries
-
-    prompt = (
-        f"Given this question: \"{question}\"\n"
-        "Generate 2 alternative search queries that would help find the answer "
-        "on Wikipedia. Use different wording, synonyms, or related terms. "
-        "Return one query per line, no numbering, no extra text."
-    )
-
-    # Try Groq first, then OpenRouter on rate-limit
-    for model, llm_client in [(m, groq_client) for m in GROQ_MODELS] + [(m, client) for m in OPENROUTER_MODELS]:
-        try:
-            resp = _try_llm_call(model, [{"role": "user", "content": prompt}],
-                                 max_tokens=100, llm_client=llm_client)
-            if resp:
-                alt_queries = [q.strip() for q in resp.split("\n") if q.strip()]
-                queries.extend(alt_queries[:2])
-                logger.info(f"[EXPAND] '{question}' → additional queries: {alt_queries[:2]}")
-            break
-        except RateLimitError:
-            continue
-        except Exception:
-            continue
-
-    return queries
-
-def expand_and_retrieve(chunks: list, embeddings: np.ndarray, question: str, top_k: int = 12) -> list:
-    expanded = expand_query_for_retrieval(question)
-    seen = set()
-    merged = []
-    for q in expanded:
-        results = hybrid_retrieve(chunks, embeddings, q, top_k=top_k)
-        for chunk in results:
-            if chunk not in seen:
-                seen.add(chunk)
-                merged.append(chunk)
-    logger.info(f"[EXPAND+RETRIEVE] {len(expanded)} queries → {len(merged)} unique chunks")
-    return merged[:top_k * 2]
 
 # ── Cache helpers ───────────────────────────────────────────────
 
@@ -822,12 +756,11 @@ def chat():
     # Rewrite ambiguous follow-up questions using conversation history
     resolved_question = rewrite_question(question, history) if history else question
 
-    # Hybrid retrieval: BM25 + vector embeddings + query expansion + cross-encoder re-ranking
+    # Fast hybrid retrieval: BM25 + vector embeddings (no LLM expansion, no cross-encoder)
     if embeddings is not None:
-        top_chunks = expand_and_retrieve(all_chunks, embeddings, resolved_question, top_k=16)
-        top_chunks = rerank_chunks(resolved_question, top_chunks, top_k=10)
+        top_chunks = hybrid_retrieve(all_chunks, embeddings, resolved_question, top_k=10)
     else:
-        top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=12)
+        top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=10)
 
     answer = answer_with_llm(
         resolved_question, top_chunks, title,
