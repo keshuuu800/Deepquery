@@ -6,3 +6,5 @@ rapidfuzz
 openai
 python-dotenv
 gunicorn
+sentence-transformers
+numpy

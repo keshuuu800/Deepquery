@@ -1,12 +1,13 @@
 """
-Wikipedia RAG Chatbot Backend - Clean Version
-- No torch/sentence-transformers (RAM-friendly)
-- BM25 retrieval (pure Python)
+Wikipedia RAG Chatbot Backend - v2
+- Hybrid retrieval: BM25 + vector embeddings (all-MiniLM-L6-v2) + RRF fusion
+- Cross-encoder re-ranking (ms-marco-MiniLM-L-6-v2)
+- LLM query expansion for retrieval
 - Model rotation for 429 errors
 - Q&A caching
 """
 
-import os, json, time, hashlib, re, logging, math
+import os, json, time, hashlib, re, logging, math, warnings
 from pathlib import Path
 from typing import Optional
 from collections import Counter
@@ -15,11 +16,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import requests
+import numpy as np
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from rapidfuzz import process, fuzz
 from openai import OpenAI, RateLimitError
+from sentence_transformers import SentenceTransformer, CrossEncoder
+
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -50,7 +55,13 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
 )
 
+# ── Embedding model for dense retrieval ─────────────────────────
+EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+RRF_K = 60  # constant for Reciprocal Rank Fusion
+
 # ── In-memory store ─────────────────────────────────────────────
+# {title: {"chunks": [...], "embeddings": np.array(...)}}
 article_store: dict = {}
 
 # ══════════════════════════════════════════════════════════════
@@ -95,6 +106,103 @@ def retrieve_chunks_bm25(chunks: list, question: str, top_k: int = 12) -> list:
         preview = chunk[:120].replace("\n", " ")
         logger.info(f"  [{i+1}] score={score:.3f} | {preview}")
     return top
+
+# ══════════════════════════════════════════════════════════════
+#  DENSE RETRIEVAL — vector embeddings (semantic search)
+# ══════════════════════════════════════════════════════════════
+
+def compute_embeddings(chunks: list) -> np.ndarray:
+    return EMBEDDING_MODEL.encode(chunks, show_progress_bar=False, normalize_embeddings=True)
+
+def retrieve_chunks_vector(query: str, embeddings: np.ndarray, chunks: list, top_k: int = 12) -> list:
+    query_emb = EMBEDDING_MODEL.encode([query], show_progress_bar=False, normalize_embeddings=True)
+    sims = np.dot(embeddings, query_emb.T).flatten()
+    top_indices = np.argsort(sims)[-top_k:][::-1]
+    return [chunks[i] for i in top_indices if sims[i] > 0]
+
+# ══════════════════════════════════════════════════════════════
+#  HYBRID RETRIEVAL — BM25 + vector via RRF
+# ══════════════════════════════════════════════════════════════
+
+def hybrid_retrieve(chunks: list, embeddings: np.ndarray, question: str, top_k: int = 12) -> list:
+    bm25_results = retrieve_chunks_bm25(chunks, question, top_k=top_k * 2)
+    vec_results = retrieve_chunks_vector(question, embeddings, chunks, top_k=top_k * 2)
+
+    rrf_scores = {}
+    for rank, chunk in enumerate(bm25_results):
+        rrf_scores[chunk] = rrf_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
+    for rank, chunk in enumerate(vec_results):
+        rrf_scores[chunk] = rrf_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
+
+    reranked = sorted(rrf_scores, key=lambda c: rrf_scores[c], reverse=True)
+    logger.info(
+        f"[HYBRID] BM25={len(bm25_results)} + Vector={len(vec_results)} "
+        f"→ {len(reranked)} merged → top {top_k}"
+    )
+    return reranked[:top_k]
+
+# ══════════════════════════════════════════════════════════════
+#  CROSS-ENCODER RE-RANKER
+# ══════════════════════════════════════════════════════════════
+
+def rerank_chunks(question: str, chunks: list, top_k: int = 8) -> list:
+    if not chunks:
+        return chunks
+    pairs = [[question, c] for c in chunks]
+    try:
+        scores = CROSS_ENCODER.predict(pairs, show_progress_bar=False)
+        scored = list(zip(scores, chunks))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        reranked = [c for _, c in scored[:top_k]]
+        logger.info(f"[RERANK] {len(chunks)} → {len(reranked)}  (top score: {scored[0][0]:.3f})")
+        return reranked
+    except Exception as e:
+        logger.warning(f"[RERANK] Failed: {e} — falling back to top {top_k}")
+        return chunks[:top_k]
+
+# ══════════════════════════════════════════════════════════════
+#  LLM-BASED QUERY EXPANSION for retrieval
+# ══════════════════════════════════════════════════════════════
+
+def expand_query_for_retrieval(question: str) -> list:
+    queries = [question]
+    if len(question.split()) < 3:
+        return queries
+
+    prompt = (
+        f"Given this question: \"{question}\"\n"
+        "Generate 2 alternative search queries that would help find the answer "
+        "on Wikipedia. Use different wording, synonyms, or related terms. "
+        "Return one query per line, no numbering, no extra text."
+    )
+
+    for model in FREE_MODELS:
+        try:
+            resp = _try_llm_call(model, [{"role": "user", "content": prompt}], max_tokens=100)
+            if resp:
+                alt_queries = [q.strip() for q in resp.split("\n") if q.strip()]
+                queries.extend(alt_queries[:2])
+                logger.info(f"[EXPAND] '{question}' → additional queries: {alt_queries[:2]}")
+            break
+        except RateLimitError:
+            continue
+        except Exception:
+            continue
+
+    return queries
+
+def expand_and_retrieve(chunks: list, embeddings: np.ndarray, question: str, top_k: int = 12) -> list:
+    expanded = expand_query_for_retrieval(question)
+    seen = set()
+    merged = []
+    for q in expanded:
+        results = hybrid_retrieve(chunks, embeddings, q, top_k=top_k)
+        for chunk in results:
+            if chunk not in seen:
+                seen.add(chunk)
+                merged.append(chunk)
+    logger.info(f"[EXPAND+RETRIEVE] {len(expanded)} queries → {len(merged)} unique chunks")
+    return merged[:top_k * 2]
 
 # ── Cache helpers ───────────────────────────────────────────────
 
@@ -437,13 +545,14 @@ def scrape_wikipedia(title: str) -> dict:
     cache_set(ck, result)
     return result
 
-def chunk_text(paragraphs: list, max_words: int = 300) -> list:
+def chunk_text(paragraphs: list, max_words: int = 300, overlap: int = 50) -> list:
     chunks, cur, cur_len = [], [], 0
     for para in paragraphs:
         words = para.split()
-        if cur_len + len(words) > max_words and cur:
-            chunks.append(" ".join(cur))
-            cur = cur[-30:]
+        while cur_len + len(words) > max_words and cur:
+            split_at = max_words - overlap
+            chunks.append(" ".join(cur[:split_at]))
+            cur = cur[split_at:]
             cur_len = len(cur)
         cur.extend(words)
         cur_len += len(words)
@@ -452,23 +561,25 @@ def chunk_text(paragraphs: list, max_words: int = 300) -> list:
     return chunks
 
 def build_index(title: str, paragraphs: list, table_chunks: list = None):
-    if title in article_store:
-        return
-    CACHE_VERSION = "v2"
+    CACHE_VERSION = "v3"
     ck = _ck(f"chunks_{CACHE_VERSION}_{title}")
     cached = cache_get(ck)
     if cached:
-        article_store[title] = {"chunks": cached["chunks"]}
-        logger.info(f"Loaded chunks from cache: {title} ({len(cached['chunks'])} total chunks)")
+        chunks = cached["chunks"]
+        embeddings = np.array(cached["embeddings"]) if "embeddings" in cached else compute_embeddings(chunks)
+        article_store[title] = {"chunks": chunks, "embeddings": embeddings}
+        logger.info(f"Loaded from cache: {title} ({len(chunks)} chunks)")
         return
+
     para_chunks = chunk_text(paragraphs)
     tbl_chunks = table_chunks or []
     all_chunks = para_chunks + tbl_chunks
-    article_store[title] = {"chunks": all_chunks}
-    cache_set(ck, {"chunks": all_chunks})
+    embeddings = compute_embeddings(all_chunks)
+    article_store[title] = {"chunks": all_chunks, "embeddings": embeddings}
+    cache_set(ck, {"chunks": all_chunks, "embeddings": embeddings.tolist()})
     logger.info(
-        f"[INDEX] '{title}': {len(para_chunks)} paragraph chunks + "
-        f"{len(tbl_chunks)} table chunks = {len(all_chunks)} total"
+        f"[INDEX] '{title}': {len(para_chunks)} paragraph + "
+        f"{len(tbl_chunks)} table = {len(all_chunks)} chunks"
     )
 
 # ── LLM with model rotation ─────────────────────────────────────
@@ -684,14 +795,22 @@ def chat():
 
     build_index(title, article["paragraphs"], article.get("table_chunks", []))
 
-    all_chunks = article_store.get(title, {}).get("chunks", [])
+    entry = article_store.get(title, {})
+    all_chunks = entry.get("chunks", [])
+    embeddings = entry.get("embeddings")
     if not all_chunks:
         return jsonify({"error": "No content found."}), 404
 
     # Rewrite ambiguous follow-up questions using conversation history
     resolved_question = rewrite_question(question, history) if history else question
 
-    top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=12)
+    # Hybrid retrieval: BM25 + vector embeddings + query expansion + cross-encoder re-ranking
+    if embeddings is not None:
+        top_chunks = expand_and_retrieve(all_chunks, embeddings, resolved_question, top_k=16)
+        top_chunks = rerank_chunks(resolved_question, top_chunks, top_k=10)
+    else:
+        top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=12)
+
     answer = answer_with_llm(
         resolved_question, top_chunks, title,
         article.get("infobox", {}),
