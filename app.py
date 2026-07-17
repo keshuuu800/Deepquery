@@ -47,13 +47,9 @@ GROQ_MODELS = [
     "mixtral-8x7b-32768",
 ]
 
-# ── OpenRouter fallback — multiple free models ────────────────
+# ── OpenRouter fallback — auto-selects best available free model ──
 OPENROUTER_MODELS = [
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-    "qwen/qwen-2-7b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
+    "openrouter/free",   # Auto-routes to best free model available right now
 ]
 
 # Keep FREE_MODELS as alias for any legacy references
