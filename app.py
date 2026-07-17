@@ -859,33 +859,54 @@ def chat():
         history=history
     )
 
-    # Score and rank article images by relevance to the resolved question.
+    # Semantic context-based image matching using local sentence-transformer model
     imgs = article.get("images") or []
     scored_images = []
-    for im in imgs:
-        fname = (im.get("url") or "").split('/')[-1]
-        candidate = f"{im.get('section','')} {im.get('alt','')} {fname}"
-        try:
-            score = float(fuzz.WRatio(resolved_question, candidate))
-        except Exception:
-            score = 0.0
-        if im.get('url'):
+    
+    # Pre-embed resolved question
+    try:
+        q_emb = EMBEDDING_MODEL.encode([resolved_question], show_progress_bar=False, normalize_embeddings=True)[0]
+    except Exception as e:
+        logger.error(f"Image query embedding error: {e}")
+        q_emb = None
+
+    if q_emb is not None:
+        for im in imgs:
+            url_val = im.get("url") or ""
+            if not url_val:
+                continue
+            fname = url_val.split('/')[-1].replace('_', ' ')
+            # Combine alt text, section heading, and filename for semantic matching
+            candidate_text = f"{im.get('alt','')} {im.get('section','')} {fname}".strip()
+            
+            try:
+                # Embed the candidate image description
+                img_emb = EMBEDDING_MODEL.encode([candidate_text], show_progress_bar=False, normalize_embeddings=True)[0]
+                # Cosine similarity (normalized inner product)
+                score = float(np.dot(q_emb, img_emb))
+            except Exception as e:
+                logger.error(f"Image candidate embedding error: {e}")
+                score = 0.0
+                
             scored_images.append({
-                "url": im.get('url'),
+                "url": url_val,
                 "alt": im.get('alt',''),
                 "section": im.get('section',''),
-                "score": round(score, 2),
+                "score": round(score, 3)
             })
+            
+        # Sort images by semantic similarity score descending
+        scored_images.sort(key=lambda x: x['score'], reverse=True)
 
-    # Sort by score descending and apply a soft threshold (keep plausible candidates)
-    scored_images.sort(key=lambda x: x['score'], reverse=True)
-
-    # If no good candidate, fallback to infobox image (if present)
+    # Threshold cutoff (0.22 similarity required for matching context)
     top_image = None
-    if scored_images and scored_images[0]['score'] >= 35:
+    if scored_images and scored_images[0]['score'] >= 0.22:
         top_image = scored_images[0]['url']
+        logger.info(f"[IMAGE] Found semantic match: {top_image} with score {scored_images[0]['score']}")
     elif article.get('image_url'):
+        # Fallback to default infobox/header image if context match wasn't strong enough
         top_image = article.get('image_url')
+        logger.info(f"[IMAGE] Fallback to infobox main image: {top_image}")
 
     return jsonify({
         "query": query,
