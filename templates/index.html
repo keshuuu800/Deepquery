@@ -616,9 +616,9 @@ async function doAsk(){
     if(!res.ok){addMsg('bot','⚠ '+(d.error||'Something went wrong.'));return;}
     S.history.push({role:'user', content: question});
     S.history.push({role:'assistant', content: d.answer});
-    // prefer server-provided ranked list (`d.images`) for richer UI, fallback to `d.image`
-    const imgs = (d.images && d.images.length) ? d.images : (d.image ? [{url: d.image, alt: ''}] : []);
-    addMsg('bot', d.answer, imgs.length? imgs : (d.image || d.image_url || null));
+    // Pass only the single context-based image string URL (d.image) if available, otherwise null.
+    // This stops array thumbs rendering or showing incorrect related images
+    addMsg('bot', d.answer, d.image || null);
     // attach click handlers for lightbox
     setTimeout(()=>{
       document.querySelectorAll('.answer-media img').forEach(imgEl=>{

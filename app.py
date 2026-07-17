@@ -898,15 +898,14 @@ def chat():
         # Sort images by semantic similarity score descending
         scored_images.sort(key=lambda x: x['score'], reverse=True)
 
-    # Threshold cutoff (0.22 similarity required for matching context)
+    # Threshold cutoff (0.28 similarity required for matching context)
     top_image = None
-    if scored_images and scored_images[0]['score'] >= 0.22:
+    if scored_images and scored_images[0]['score'] >= 0.28:
         top_image = scored_images[0]['url']
         logger.info(f"[IMAGE] Found semantic match: {top_image} with score {scored_images[0]['score']}")
-    elif article.get('image_url'):
-        # Fallback to default infobox/header image if context match wasn't strong enough
-        top_image = article.get('image_url')
-        logger.info(f"[IMAGE] Fallback to infobox main image: {top_image}")
+    else:
+        # Strict context matching: do NOT fall back to general infobox image if she is not mentioned in context
+        logger.info("[IMAGE] No highly relevant context image found. Rendering text only.")
 
     return jsonify({
         "query": query,
