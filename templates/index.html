@@ -554,26 +554,10 @@ function addMsg(role,text,image){
       return `<p>${line}</p>`;
     }).join('');
   }
-  // include image for bot answers when available. `image` may be a URL or an object
+  // include single image for bot answers when available. `image` is expected to be a single string URL
   let mediaHtml = '';
-  if(role==='bot' && image){
-    if(typeof image === 'string'){
-      mediaHtml = `<div class="answer-media"><img src="${esc(image)}" alt="" data-large="${esc(image)}"/></div>`;
-    } else if(Array.isArray(image) && image.length){
-      // show top image and small thumbnails for alternatives
-      const top = image[0];
-      mediaHtml = `<div class="answer-media"><img src="${esc(top.url)}" alt="${esc(top.alt||top.section||'')||''}" data-large="${esc(top.url)}"/></div>`;
-      // thumbnails
-      if(image.length>1){
-        mediaHtml += `<div style="display:flex;gap:8px;margin-top:6px">`;
-        image.slice(1,5).forEach(it=>{
-          mediaHtml += `<img src="${esc(it.url)}" alt="${esc(it.alt||it.section||'')}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;cursor:pointer" data-large="${esc(it.url)}"/>`;
-        });
-        mediaHtml += `</div>`;
-      }
-    } else if(typeof image === 'object' && image.url){
-      mediaHtml = `<div class="answer-media"><img src="${esc(image.url)}" alt="${esc(image.alt||image.section||'')}" data-large="${esc(image.url)}"/></div>`;
-    }
+  if(role==='bot' && image && typeof image === 'string'){
+    mediaHtml = `<div class="answer-media"><img src="${esc(image)}" alt="" data-large="${esc(image)}"/></div>`;
   }
   w.innerHTML=`<div class="msg-lbl">${role==='user'?'You':'Deep'}</div>
     <div class="mb"><div class="mr">${role==='user'?'Question':'Answer'}</div>
