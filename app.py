@@ -40,11 +40,10 @@ RATE_LIMIT_DELAY = 0.8
 
 # ── Groq primary models (fast, free tier) ───────────────────────
 GROQ_MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama3-70b-8192",
-    "gemma2-9b-it",
-    "llama3-8b-8192",
-    "mixtral-8x7b-32768",
+    "llama-3.3-70b-versatile",       # Best quality, active ✅
+    "llama-3.1-8b-instant",          # Fast, lightweight, active ✅
+    "llama-4-scout-17b-16e-instruct", # Llama 4, active ✅
+    "qwen-qwq-32b",                  # Qwen reasoning model, active ✅
 ]
 
 # ── OpenRouter fallback — auto-selects best available free model ──
