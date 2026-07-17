@@ -131,25 +131,58 @@ def retrieve_chunks_vector(query: str, embeddings: np.ndarray, chunks: list, top
     top_indices = np.argsort(sims)[-top_k:][::-1]
     return [chunks[i] for i in top_indices if sims[i] > 0]
 
-# ══════════════════════════════════════════════════════════════
-#  HYBRID RETRIEVAL — BM25 + vector via RRF
-# ══════════════════════════════════════════════════════════════
+def _augment_queries(question: str, title: str) -> list:
+    """Generate multiple search queries to maximize recall."""
+    queries = [question]
+    q_lower = question.lower().strip("?. ")
+    if title:
+        queries.append(f"{title}: {question}")
+        is_definition_q = any(q_lower.startswith(p) for p in [
+            "what is", "what are", "who is", "who was", "who are",
+            "tell me about", "describe", "explain",
+        ])
+        if is_definition_q:
+            queries.append(title)
+            queries.append(f"{title} is")
+        elif any(q_lower.startswith(p) for p in ["when was", "when did", "when is", "what year"]):
+            queries.append(f"{title} date year founded born")
+        elif any(w in q_lower for w in ["how many", "how much", "how tall", "how high",
+                                         "height", "elevation", "altitude", "population",
+                                         "score", "runs", "average", "record"]):
+            queries.append(f"{title} statistics numbers data")
+        elif any(q_lower.startswith(p) for p in ["why", "what caused", "reason"]):
+            queries.append(f"{title} cause reason why")
+        elif any(q_lower.startswith(p) for p in ["where", "location", "situated"]):
+            queries.append(f"{title} location situated country")
+    unique = []
+    for q in queries:
+        if q not in unique:
+            unique.append(q)
+    return unique
 
-def hybrid_retrieve(chunks: list, embeddings: np.ndarray, question: str, top_k: int = 12) -> list:
-    bm25_results = retrieve_chunks_bm25(chunks, question, top_k=top_k * 2)
-    vec_results = retrieve_chunks_vector(question, embeddings, chunks, top_k=top_k * 2)
+def hybrid_retrieve(chunks: list, embeddings: np.ndarray, question: str, title: str = "", top_k: int = 12) -> list:
+    queries = _augment_queries(question, title)
+    combined_scores = {}
+    
+    # Run retrieval for all augmented queries and merge results by best RRF score
+    for query in queries:
+        bm25_results = retrieve_chunks_bm25(chunks, query, top_k=top_k * 2)
+        vec_results = retrieve_chunks_vector(query, embeddings, chunks, top_k=top_k * 2)
+        
+        for rank, chunk in enumerate(bm25_results):
+            combined_scores[chunk] = combined_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
+        for rank, chunk in enumerate(vec_results):
+            combined_scores[chunk] = combined_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
 
-    rrf_scores = {}
-    for rank, chunk in enumerate(bm25_results):
-        rrf_scores[chunk] = rrf_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
-    for rank, chunk in enumerate(vec_results):
-        rrf_scores[chunk] = rrf_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
-
-    reranked = sorted(rrf_scores, key=lambda c: rrf_scores[c], reverse=True)
-    logger.info(
-        f"[HYBRID] BM25={len(bm25_results)} + Vector={len(vec_results)} "
-        f"→ {len(reranked)} merged → top {top_k}"
-    )
+    reranked = sorted(combined_scores, key=lambda c: combined_scores[c], reverse=True)
+    
+    # Guarantee intro chunks are included for definition queries
+    intro_anchors = chunks[:min(3, len(chunks))]
+    for chunk in intro_anchors:
+        if chunk not in reranked:
+            reranked.insert(0, chunk) # Place at top or guarantee presence
+            
+    logger.info(f"[HYBRID] Multi-query search merged into top {top_k}")
     return reranked[:top_k]
 
 # ── Cache helpers ───────────────────────────────────────────────
@@ -400,14 +433,39 @@ def extract_table_chunks(content_div) -> list:
     return table_chunks
 
 
+def fetch_explaintext(title: str) -> str:
+    """Fetch clean wikitext extract plain text from Wikipedia."""
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "prop": "extracts",
+        "titles": title,
+        "format": "json",
+        "redirects": 1,
+        "explaintext": 1,
+    }
+    try:
+        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            pages = r.json().get("query", {}).get("pages", {})
+            for page in pages.values():
+                return page.get("extract", "")
+    except Exception as e:
+        logger.error(f"Explaintext fetch error: {e}")
+    return ""
+
+
 def scrape_wikipedia(title: str) -> dict:
     # Version tag — bump this to invalidate caches when extraction logic changes
-    CACHE_VERSION = "v2"
+    CACHE_VERSION = "v4"
     ck = _ck(f"scrape_{CACHE_VERSION}_{title}")
     cached = cache_get(ck)
     if cached:
         logger.info(f"Cache hit: {title}")
         return cached
+
+    # Fetch clean wikitext extracts first to avoid HTML noise in prose RAG
+    explaintext = fetch_explaintext(title)
 
     url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
     try:
@@ -486,21 +544,33 @@ def scrape_wikipedia(title: str) -> dict:
             continue
         images.append({"url": url_abs, "alt": alt, "section": section})
 
-    # Remove noise (after table extraction so we don't lose content tables)
-    for sel in ["sup", "div.navbox", "div.reflist", "table.navbox", "table.ambox",
-                "div.hatnote", "div.toc", "div.mw-references-wrap", "div.thumb",
-                "span.noprint", "div.noprint", "div.mw-editsection"]:
-        for el in soup.select(sel):
-            el.decompose()
-
+    # Process paragraphs: prioritize clean explaintext if available
     paragraphs = []
-    if content:
-        for p in content.find_all("p"):
-            text = p.get_text(" ", strip=True)
-            if len(text) > 60:
-                text = re.sub(r"\[\d+\]", "", text)
-                text = re.sub(r"\s+", " ", text).strip()
-                paragraphs.append(text)
+    if explaintext:
+        # Split explaintext into clean paragraphs, removing headers like "== History =="
+        for line in explaintext.split("\n"):
+            line = line.strip()
+            if not line or (line.startswith("==") and line.endswith("==")):
+                continue
+            if len(line) > 60:
+                paragraphs.append(line)
+
+    # If explaintext was empty, fallback to soup parsing
+    if not paragraphs:
+        # Remove noise (after table extraction so we don't lose content tables)
+        for sel in ["sup", "div.navbox", "div.reflist", "table.navbox", "table.ambox",
+                    "div.hatnote", "div.toc", "div.mw-references-wrap", "div.thumb",
+                    "span.noprint", "div.noprint", "div.mw-editsection"]:
+            for el in soup.select(sel):
+                el.decompose()
+
+        if content:
+            for p in content.find_all("p"):
+                text = p.get_text(" ", strip=True)
+                if len(text) > 60:
+                    text = re.sub(r"\[\d+\]", "", text)
+                    text = re.sub(r"\s+", " ", text).strip()
+                    paragraphs.append(text)
 
     result = {
         "title": title, "url": url,
@@ -777,9 +847,9 @@ def chat():
     # Rewrite ambiguous follow-up questions using conversation history
     resolved_question = rewrite_question(question, history) if history else question
 
-    # Fast hybrid retrieval: BM25 + vector embeddings (no LLM expansion, no cross-encoder)
+    # Fast hybrid retrieval: BM25 + vector embeddings (with query expansion, anchors)
     if embeddings is not None:
-        top_chunks = hybrid_retrieve(all_chunks, embeddings, resolved_question, top_k=10)
+        top_chunks = hybrid_retrieve(all_chunks, embeddings, resolved_question, title=title, top_k=10)
     else:
         top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=10)
 
