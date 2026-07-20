@@ -131,16 +131,18 @@ def retrieve_chunks_vector(query: str, embeddings: np.ndarray, chunks: list, top
     return [chunks[i] for i in top_indices if sims[i] > 0]
 
 def _augment_queries(question: str, title: str) -> list:
-    """Generate multiple search queries to maximize recall."""
     queries = [question]
     q_lower = question.lower().strip("?. ")
+    title_lower = title.lower()
     if title:
         queries.append(f"{title}: {question}")
-        is_definition_q = any(q_lower.startswith(p) for p in [
-            "what is", "what are", "who is", "who was", "who are",
-            "tell me about", "describe", "explain",
-        ])
-        if is_definition_q:
+        generic_about_title = (
+            q_lower.strip("?. ") in [title_lower, f"what is {title_lower}", f"what are {title_lower}",
+                                      f"who is {title_lower}", f"tell me about {title_lower}",
+                                      f"describe {title_lower}", f"explain {title_lower}"]
+            or q_lower == title_lower
+        )
+        if generic_about_title:
             queries.append(title)
             queries.append(f"{title} is")
         elif any(q_lower.startswith(p) for p in ["when was", "when did", "when is", "what year"]):
@@ -165,8 +167,8 @@ def hybrid_retrieve(chunks: list, embeddings: np.ndarray, question: str, title: 
     
     # Run retrieval for all augmented queries and merge results by best RRF score
     for query in queries:
-        bm25_results = retrieve_chunks_bm25(chunks, query, top_k=top_k * 2)
-        vec_results = retrieve_chunks_vector(query, embeddings, chunks, top_k=top_k * 2)
+        bm25_results = retrieve_chunks_bm25(chunks, query, top_k=top_k * 3)
+        vec_results = retrieve_chunks_vector(query, embeddings, chunks, top_k=top_k * 3)
         
         for rank, chunk in enumerate(bm25_results):
             combined_scores[chunk] = combined_scores.get(chunk, 0) + 1 / (RRF_K + rank + 1)
@@ -175,12 +177,12 @@ def hybrid_retrieve(chunks: list, embeddings: np.ndarray, question: str, title: 
 
     reranked = sorted(combined_scores, key=lambda c: combined_scores[c], reverse=True)
     
-    # Guarantee intro chunks are included for definition queries
+    # Re-add intro chunks at the END (not top) to preserve actual relevance ranking
     intro_anchors = chunks[:min(3, len(chunks))]
     for chunk in intro_anchors:
         if chunk not in reranked:
-            reranked.insert(0, chunk) # Place at top or guarantee presence
-            
+            reranked.append(chunk)
+
     logger.info(f"[HYBRID] Multi-query search merged into top {top_k}")
     return reranked[:top_k]
 
@@ -583,7 +585,7 @@ def scrape_wikipedia(title: str) -> dict:
     cache_set(ck, result)
     return result
 
-def chunk_text(paragraphs: list, max_words: int = 300, overlap: int = 50) -> list:
+def chunk_text(paragraphs: list, max_words: int = 500, overlap: int = 100) -> list:
     chunks, cur, cur_len = [], [], 0
     for para in paragraphs:
         words = para.split()
@@ -599,7 +601,7 @@ def chunk_text(paragraphs: list, max_words: int = 300, overlap: int = 50) -> lis
     return chunks
 
 def build_index(title: str, paragraphs: list, table_chunks: list = None):
-    CACHE_VERSION = "v3"
+    CACHE_VERSION = "v4"
     ck = _ck(f"chunks_{CACHE_VERSION}_{title}")
     cached = cache_get(ck)
     if cached:
@@ -720,15 +722,17 @@ def answer_with_llm(question: str, chunks: list, title: str, infobox: dict,
         ib = "KEY FACTS:\n" + "\n".join(lines) + "\n\n"
 
     system_msg = (
-        "You are a factual assistant. You answer questions ONLY using the Wikipedia content provided. "
-        "CRITICAL FORMATTING RULES — violating these is not allowed:\n"
-        "  1. Use PLAIN TEXT only. No markdown whatsoever.\n"
-        "  2. Do NOT write **bold**, *italic*, __underline__, or `code`.\n"
-        "  3. Do NOT write # headers or ## subheadings.\n"
-        "  4. Do NOT use - or * as bullet points. Use plain numbered lists (1. 2. 3.) if needed.\n"
-        "  5. If the answer is not in the provided context, reply exactly: "
+        "You are a factual assistant. Answer based ONLY on the Wikipedia content provided. "
+        "The content is split into multiple passages separated by '---'. You may need to "
+        "combine information from different passages to answer the question.\n\n"
+        "CRITICAL RULES:\n"
+        "  1. PLAIN TEXT only. No markdown (**bold**, *italic*, # headers, bullet points).\n"
+        "  2. If multiple passages together contain the answer, synthesize them.\n"
+        "  3. If the question makes a false claim or asks about something impossible, "
+        'politely correct it using the Wikipedia facts.\n'
+        "  4. If the information is genuinely not in the context at all, reply: "
         '"Information not found in the Wikipedia article."\n'
-        "  6. Be concise and direct."
+        "  5. Be concise and direct."
     )
 
     context_block = f"{ib}WIKIPEDIA CONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER (plain text only, no markdown):"
@@ -739,7 +743,10 @@ def answer_with_llm(question: str, chunks: list, title: str, infobox: dict,
     if history:
         # Inject prior conversation turns (last 6 turns) before the context block
         for turn in history[-6:]:
-            messages.append({"role": turn["role"], "content": turn["content"]})
+            role = turn["role"]
+            if role == "bot":
+                role = "assistant"  # Groq/OpenAI only accept "user" or "assistant"
+            messages.append({"role": role, "content": turn["content"]})
 
     messages.append({"role": "user", "content": context_block})
 
@@ -848,9 +855,9 @@ def chat():
 
     # Fast hybrid retrieval: BM25 + vector embeddings (with query expansion, anchors)
     if embeddings is not None:
-        top_chunks = hybrid_retrieve(all_chunks, embeddings, resolved_question, title=title, top_k=10)
+        top_chunks = hybrid_retrieve(all_chunks, embeddings, resolved_question, title=title, top_k=15)
     else:
-        top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=10)
+        top_chunks = retrieve_chunks_bm25(all_chunks, resolved_question, top_k=15)
 
     answer = answer_with_llm(
         resolved_question, top_chunks, title,
@@ -897,13 +904,13 @@ def chat():
         # Sort images by semantic similarity score descending
         scored_images.sort(key=lambda x: x['score'], reverse=True)
 
-    # Threshold cutoff (0.28 similarity required for matching context)
+    # Strict threshold cutoff (0.40 similarity required for matching context to avoid irrelevant images)
     top_image = None
-    if scored_images and scored_images[0]['score'] >= 0.28:
+    if scored_images and scored_images[0]['score'] >= 0.40:
         top_image = scored_images[0]['url']
         logger.info(f"[IMAGE] Found semantic match: {top_image} with score {scored_images[0]['score']}")
     else:
-        # Strict context matching: do NOT fall back to general infobox image if she is not mentioned in context
+        # Strict context matching: do NOT return an image if there is no highly relevant match
         logger.info("[IMAGE] No highly relevant context image found. Rendering text only.")
 
     return jsonify({
