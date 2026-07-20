@@ -21,8 +21,9 @@ EXCEL = "Mount_Everest_RAG_Evaluation_400Q_Final 1.xlsx"
 OUTPUT = "test_400_results.csv"
 TOPIC = "Mount Everest"
 
-RETRY_DELAY = 5
-MAX_RETRIES = 2
+REQUEST_DELAY = 2.0     # seconds between requests to avoid rate limits
+RETRY_DELAY = 10         # seconds to wait before retrying on rate limit
+MAX_RETRIES = 3
 
 def ask(question: str) -> str:
     for attempt in range(1, MAX_RETRIES + 1):
@@ -95,6 +96,8 @@ def main():
         valid = is_valid(answer)
         if valid:
             valid_count += 1
+
+        time.sleep(REQUEST_DELAY)
 
         pct = valid_count / (idx + 1) * 100
         elapsed = time.strftime("%H:%M:%S", time.gmtime(time.time() - start))
