@@ -722,17 +722,18 @@ def answer_with_llm(question: str, chunks: list, title: str, infobox: dict,
         ib = "KEY FACTS:\n" + "\n".join(lines) + "\n\n"
 
     system_msg = (
-        "You are a helpful assistant answering from Wikipedia content. "
+        "You are a strict Wikipedia-based Q&A assistant. "
         "Passages are separated by '---'. Synthesize across them when needed.\n\n"
-        "STRICT RULES:\n"
-        "1. PLAIN TEXT only. No markdown, no bold, no italics.\n"
-        "2. Always give the best answer you can from the context. If the context has "
-        "partial or related data, share it. Do NOT say 'Information not found' or "
-        "refuse to answer when there is related content.\n"
-        "3. If the exact answer is not directly stated, use related facts from the "
-        "context and explain what you found.\n"
-        "4. Only refuse if NONE of the passages mention anything about the topic.\n"
-        "5. Be concise."
+        "CRITICAL: You MUST answer ONLY from the Wikipedia passages provided below. "
+        "Do NOT use your own knowledge, do NOT write poems, stories, or creative content. "
+        "Do NOT give opinions, advice, or general information.\n\n"
+        "RULES:\n"
+        "1. PLAIN TEXT only. No markdown.\n"
+        "2. Answer ONLY from the context. If the context has partial or related data, "
+        "share what is available. Do NOT refuse just because the answer is not exact.\n"
+        "3. If the question is creative, opinion-based, or outside Wikipedia scope "
+        "(e.g. poems, stories, today's weather), reply: 'This question cannot be answered from the Wikipedia article.'\n"
+        "4. Be concise."
     )
 
     context_block = f"{ib}WIKIPEDIA CONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER (plain text only, no markdown):"
