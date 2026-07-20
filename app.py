@@ -48,7 +48,10 @@ GROQ_MODELS = [
 
 # ── OpenRouter fallback — auto-selects best available free model ──
 OPENROUTER_MODELS = [
-    "openrouter/free",   # Auto-routes to best free model available right now
+    "openrouter/free",                           # Router: picks best free model automatically
+    "meta-llama/llama-3.3-70b-instruct:free",   # Llama 70B free
+    "qwen/qwen3-coder:free",                     # Qwen coder free
+    "google/gemma-4-31b-it:free",                # Gemma 4 free
 ]
 
 # Keep FREE_MODELS as alias for any legacy references
